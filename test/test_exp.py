@@ -1,32 +1,9 @@
 """Tests for experiment modules."""
 
-from pathlib import Path
-
 import pytest
 import torch
 
-from exp import DATASET_DIRNAME, OUTPUT_DIRNAME
 from exp.sft_finetune import ExperimentConfig, set_seed
-
-
-class TestExperimentConstants:
-    """Tests for experiment module constants."""
-
-    def test_dataset_dirname_is_string(self) -> None:
-        """Test that DATASET_DIRNAME is a string path."""
-        assert isinstance(DATASET_DIRNAME, str)
-        assert len(DATASET_DIRNAME) > 0
-
-    def test_output_dirname_is_string(self) -> None:
-        """Test that OUTPUT_DIRNAME is a string path."""
-        assert isinstance(OUTPUT_DIRNAME, str)
-        assert len(OUTPUT_DIRNAME) > 0
-
-    def test_paths_are_absolute_or_relative(self) -> None:
-        """Test that paths can be resolved."""
-        # Should not raise
-        Path(DATASET_DIRNAME).resolve()
-        Path(OUTPUT_DIRNAME).resolve()
 
 
 class TestExperimentConfig:

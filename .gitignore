@@ -45,7 +45,9 @@ htmlcov/
 
 # Project-specific
 out/
+outputs/
 dataset/
+.cursor/
 *.pt
 *.pth
 *.bin

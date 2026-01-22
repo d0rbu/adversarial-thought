@@ -9,6 +9,7 @@ padding: max_length
 # Data loading
 num_workers: 4
 streaming: false  # Set to true for very large datasets
+max_samples: 10000  # Maximum number of samples to use. Set to null to use all samples.
 
 # Train/validation split
 split:

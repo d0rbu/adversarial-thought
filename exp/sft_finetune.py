@@ -7,8 +7,6 @@ from typing import Any, cast
 import hydra
 import numpy as np
 import torch as t
-import wandb
-from datasets import DatasetDict
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, TaskType, get_peft_model
@@ -21,6 +19,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import wandb
 from core.data import load_and_prepare_conversation_dataset
 from core.dtype import get_dtype
 
@@ -54,6 +53,7 @@ class ExperimentConfig:
     dataset_name: str = "allenai/Dolci-Instruct-SFT"
     max_length: int = 2048
     train_ratio: float = 0.9
+    max_samples: int | None = None
 
     # Training
     num_epochs: int = 3
@@ -85,20 +85,6 @@ def set_seed(seed: int) -> None:
     t.manual_seed(seed)
     if t.cuda.is_available():
         t.cuda.manual_seed_all(seed)
-
-
-def load_and_prepare_dataset(
-    cfg: ExperimentConfig,
-    tokenizer: PreTrainedTokenizer,
-) -> DatasetDict:
-    """Load and prepare the dataset for training."""
-    return load_and_prepare_conversation_dataset(
-        dataset_name=cfg.dataset_name,
-        tokenizer=tokenizer,
-        seed=cfg.seed,
-        train_ratio=cfg.train_ratio,
-        max_length=cfg.max_length,
-    )
 
 
 def load_model_and_tokenizer(
@@ -198,6 +184,7 @@ def config_to_experiment_config(cfg: DictConfig) -> ExperimentConfig:
         dataset_name=cfg.data.name,
         max_length=cfg.data.max_length,
         train_ratio=cfg.data.split.train_ratio,
+        max_samples=cfg.data.max_samples,
         num_epochs=cfg.training.num_epochs,
         batch_size=cfg.training.batch_size,
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
@@ -243,7 +230,14 @@ def main(cfg: DictConfig) -> None:
     model, tokenizer = load_model_and_tokenizer(exp_cfg)
 
     # Load and prepare dataset
-    datasets = load_and_prepare_dataset(exp_cfg, tokenizer)
+    datasets = load_and_prepare_conversation_dataset(
+        dataset_name=exp_cfg.dataset_name,
+        tokenizer=tokenizer,
+        seed=exp_cfg.seed,
+        train_ratio=exp_cfg.train_ratio,
+        max_length=exp_cfg.max_length,
+        max_samples=exp_cfg.max_samples,
+    )
 
     # Create data collator
     data_collator = DataCollatorForLanguageModeling(
