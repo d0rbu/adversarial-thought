@@ -45,15 +45,17 @@ htmlcov/
 
 # Project-specific
 out/
-outputs/
 dataset/
 .cursor/
+.hypothesis/
 *.pt
 *.pth
 *.bin
 *.safetensors
 
 # Hydra outputs
+hydra/
+outputs/
 multirun/
 
 # Weights & Biases

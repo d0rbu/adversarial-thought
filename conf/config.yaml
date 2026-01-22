@@ -25,3 +25,8 @@ hardware:
   device: cuda
   dtype: bfloat16
   compile: true
+
+# Hydra settings
+hydra:
+  run:
+    dir: hydra
