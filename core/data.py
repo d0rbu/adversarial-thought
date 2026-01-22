@@ -93,9 +93,6 @@ def load_and_prepare_conversation_dataset(
             return_tensors=None,
         )
 
-        # For causal LM, labels are the same as input_ids
-        tokenized["labels"] = tokenized["input_ids"].copy()
-
         return tokenized
 
     # Tokenize datasets

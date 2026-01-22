@@ -4,12 +4,12 @@ name: allenai/Dolci-Instruct-SFT
 # Tokenization settings
 max_length: 2048
 truncation: true
-padding: max_length
+padding: longest
 
 # Data loading
 num_workers: 4
 streaming: false  # Set to true for very large datasets
-max_samples: 10000  # Maximum number of samples to use. Set to null to use all samples.
+max_samples: 50000  # Maximum number of samples to use. Set to null to use all samples.
 
 # Train/validation split
 split:

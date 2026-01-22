@@ -5,8 +5,8 @@ tokenizer: ${model.name}
 # LoRA configuration for efficient finetuning
 lora:
   enabled: true
-  r: 16
-  alpha: 32
+  r: 64
+  alpha: 128
   dropout: 0.05
   target_modules:
   - q_proj
@@ -22,4 +22,4 @@ lora:
 # Model loading settings
 load_in_8bit: false
 load_in_4bit: false
-attn_implementation: sdpa  # or flash_attention_2 if available
+attn_implementation: flash_attention_2
