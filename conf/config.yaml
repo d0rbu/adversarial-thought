@@ -1,0 +1,27 @@
+# Default configuration for adversarial-thought experiments
+defaults:
+- _self_
+- model: gemma3_1b
+- data: dolci_sft
+- training: default
+
+# Experiment metadata
+experiment:
+  name: sft_baseline
+  seed: 42
+  output_dir: out/${experiment.name}
+
+# Weights & Biases logging
+wandb:
+  enabled: true
+  project: adversarial-thought
+  entity:       # Set to your W&B entity or leave null for default
+  tags:
+  - sft
+  - baseline
+
+# Hardware settings
+hardware:
+  device: cuda
+  dtype: bfloat16
+  compile: true

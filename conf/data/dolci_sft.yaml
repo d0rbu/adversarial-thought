@@ -1,0 +1,15 @@
+# Dolci Instruct SFT dataset configuration
+name: allenai/Dolci-Instruct-SFT
+
+# Tokenization settings
+max_length: 2048
+truncation: true
+padding: max_length
+
+# Data loading
+num_workers: 4
+streaming: false  # Set to true for very large datasets
+
+# Train/validation split
+split:
+  train_ratio: 0.9
