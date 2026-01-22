@@ -1,0 +1,15 @@
+# Quick test configuration for oracle evaluation
+# Uses minimal questions and contexts for fast testing
+defaults:
+- /oracle/default
+
+# Override with fewer questions and contexts for quick testing
+questions:
+  split: train
+  n_questions: 2
+
+context:
+  source: custom
+  custom_prompts:
+  - The capital of France is Paris.
+  - Python is a programming language.

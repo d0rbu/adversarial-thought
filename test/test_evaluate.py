@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 
 import yaml
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from exp.evaluate import (
     EvalConfig,
@@ -122,6 +124,51 @@ class TestExtractMetrics:
         assert "hellaswag/alias" not in metrics
         assert "hellaswag/stderr" not in metrics
 
+    @given(
+        task_names=st.lists(st.text(min_size=1, max_size=20), min_size=1, max_size=5),
+        metric_values=st.lists(
+            st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+            min_size=1,
+            max_size=5,
+        ),
+    )
+    @settings(max_examples=30)
+    def test_property_extract_metrics_returns_dict(
+        self, task_names: list[str], metric_values: list[float]
+    ) -> None:
+        """Property: extract_metrics always returns a dictionary."""
+        # Create results dict with generated task names and values
+        results = {"results": {}}
+        for i, task_name in enumerate(task_names):
+            if i < len(metric_values):
+                results["results"][task_name] = {
+                    "acc,none": metric_values[i],
+                }
+
+        metrics = extract_metrics(results)
+
+        assert isinstance(metrics, dict)
+        assert all(isinstance(k, str) for k in metrics)
+        assert all(isinstance(v, int | float) for v in metrics.values())
+
+    @given(
+        num_tasks=st.integers(min_value=1, max_value=5),
+        metric_value=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    )
+    @settings(max_examples=20)
+    def test_property_extract_metrics_preserves_count(
+        self, num_tasks: int, metric_value: float
+    ) -> None:
+        """Property: Number of extracted metrics matches number of tasks."""
+        results = {"results": {}}
+        for i in range(num_tasks):
+            results["results"][f"task_{i}"] = {"acc,none": metric_value}
+
+        metrics = extract_metrics(results)
+
+        # Should have one metric per task
+        assert len(metrics) == num_tasks
+
 
 class TestFormatMetricsByTask:
     """Tests for format_metrics_by_task function."""
@@ -163,6 +210,58 @@ class TestFormatMetricsByTask:
 
         assert "unknown" in by_task
         assert by_task["unknown"]["accuracy"] == 0.5
+
+    @given(
+        task_names=st.lists(st.text(min_size=1, max_size=10), min_size=1, max_size=5),
+        metric_names=st.lists(st.text(min_size=1, max_size=10), min_size=1, max_size=3),
+        metric_values=st.lists(
+            st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+            min_size=1,
+            max_size=5,
+        ),
+    )
+    @settings(max_examples=30)
+    def test_property_format_metrics_preserves_values(
+        self,
+        task_names: list[str],
+        metric_names: list[str],
+        metric_values: list[float],
+    ) -> None:
+        """Property: format_metrics_by_task preserves all metric values."""
+        # Create flat metrics dict
+        flat_metrics: dict[str, float] = {}
+        for i, task_name in enumerate(task_names):
+            if i < len(metric_names) and i < len(metric_values):
+                key = f"{task_name}/{metric_names[i]}"
+                flat_metrics[key] = metric_values[i]
+
+        by_task = format_metrics_by_task(flat_metrics)
+
+        # Check that all values are preserved
+        total_values = sum(len(metrics) for metrics in by_task.values())
+        assert total_values == len(flat_metrics)
+
+    @given(
+        num_metrics=st.integers(min_value=1, max_value=10),
+        metric_value=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    )
+    @settings(max_examples=20)
+    def test_property_format_metrics_rounds_values(
+        self, num_metrics: int, metric_value: float
+    ) -> None:
+        """Property: format_metrics_by_task rounds values to 4 decimal places."""
+        flat_metrics = {
+            f"task_{i}/metric_{i}": metric_value for i in range(num_metrics)
+        }
+
+        by_task = format_metrics_by_task(flat_metrics)
+
+        # Check that all values are rounded to 4 decimal places
+        for task_metrics in by_task.values():
+            for value in task_metrics.values():
+                # Value should be rounded (check by converting to string)
+                value_str = f"{value:.4f}"
+                assert abs(value - float(value_str)) < 1e-10
 
 
 class TestSaveResultsYaml:

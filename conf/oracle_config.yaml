@@ -2,6 +2,7 @@
 defaults:
 - _self_
 - oracle: default
+- data: dolci_sft
 
 # Experiment metadata
 experiment:
@@ -33,19 +34,14 @@ questions:
 # LLM Judge configuration
 judge:
   model: gpt-5-nano
-  max_tokens: 200
+  max_tokens: 2048
 
 # Context prompts source
 context:
   # Source: "dataset" or "custom"
-  source: custom
+  source: dataset
   # For dataset source - number of samples
   n_samples: 100
-  # For custom source - list of prompts
-  custom_prompts:
-  - The capital of France is Paris. Paris is known for the Eiffel Tower.
-  - Python is a programming language. It uses indentation for code blocks.
-  - The Earth orbits the Sun. One orbit takes approximately 365 days.
 
 # Hydra settings
 hydra:

@@ -6,6 +6,7 @@ An LLM judge scores the oracle's response accuracy from 1-5.
 
 Setup:
     Set OPENAI_API_KEY environment variable for the LLM judge.
+    You can set it in your environment or in a .env file in the project root.
 
 Usage:
     from exp.oracle import OracleConfig, run_oracle_eval
@@ -26,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+from dotenv import load_dotenv
 from loguru import logger
 from nl_probes.base_experiment import (
     VerbalizerEvalConfig,
@@ -37,6 +39,11 @@ from nl_probes.base_experiment import (
 )
 from openai import OpenAI
 from peft import PeftModel
+
+from core.type import assert_type
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @dataclass
@@ -97,8 +104,8 @@ class OracleResult:
 class OracleEvalResults:
     """Aggregated results from oracle evaluation."""
 
-    results: list[OracleResult] = field(default_factory=list)
     config: OracleConfig
+    results: list[OracleResult] = field(default_factory=list)
 
     def mean_score(self) -> float:
         """Compute mean judge score from results."""
@@ -157,14 +164,29 @@ def judge_response(
         max_tokens: Maximum tokens for judge response
 
     Returns:
-        Tuple of (score 1-5, reasoning) or (None, None) if judging fails
+        Tuple of (score 1-5, reasoning)
     """
+    # Validate inputs
+    assert (
+        isinstance(context, str) and len(context) > 0
+    ), "Context must be a non-empty string"
+    assert (
+        isinstance(question, str) and len(question) > 0
+    ), "Question must be a non-empty string"
+    assert (
+        isinstance(response, str) and len(response) > 0
+    ), "Response must be a non-empty string"
+    assert isinstance(model, str) and len(model) > 0, "Model must be a non-empty string"
+    assert (
+        isinstance(max_tokens, int) and max_tokens > 0
+    ), f"max_tokens must be a positive integer, got {max_tokens}"
+
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")
+    api_key = assert_type(api_key, str)
 
     client = OpenAI(api_key=api_key)
-
     user_prompt = JUDGE_USER_PROMPT.format(
         context=context,
         question=question,
@@ -181,24 +203,33 @@ def judge_response(
         max_tokens=max_tokens,
     )
 
-    # Make sure the response did not get truncated
-    if completion.choices[0].message.content is None:
-        raise ValueError("Response was truncated")
+    assert completion is not None, "Completion cannot be None"
+    assert len(completion.choices) > 0, "Completion must have at least one choice"
+    assert completion.choices[0].message is not None, "Message cannot be None"
 
-    response_text = completion.choices[0].message.content or ""
+    response_text = completion.choices[0].message.content
+    assert response_text, "Response was truncated or empty"
 
-    # Parse JSON response
-    # Handle potential markdown code blocks
+    # Parse JSON response - handle potential markdown code blocks
     if "```json" in response_text:
         response_text = response_text.split("```json")[1].split("```")[0]
     elif "```" in response_text:
         response_text = response_text.split("```")[1].split("```")[0]
 
     result = json.loads(response_text.strip())
-    score = int(result.get("score", 0))
-    reasoning = result.get("reasoning", "")
+    assert isinstance(result, dict), "Judge response must be a JSON object"
+    assert "score" in result, "Judge response must have 'score' field"
+    assert "reasoning" in result, "Judge response must have 'reasoning' field"
 
-    # Validate score range
+    score_raw = result.get("score", 0)
+    assert isinstance(score_raw, int), "Score must be an integer"
+    score = int(score_raw)
+
+    reasoning = result["reasoning"]
+    assert isinstance(reasoning, str), "Reasoning must be a string"
+    assert len(reasoning) > 0, "Reasoning cannot be empty"
+
+    # Validate and clamp score range
     if not 1 <= score <= 5:
         logger.warning(f"Invalid score {score}, clamping to 1-5")
         score = max(1, min(5, score))
@@ -231,6 +262,39 @@ def run_oracle_eval(
     Returns:
         OracleEvalResults with individual results and mean score
     """
+    # Validate inputs
+    assert config is not None, "Config cannot be None"
+    assert isinstance(questions, list), "Questions must be a list"
+    assert isinstance(contexts, list), "Contexts must be a list"
+
+    assert len(questions) > 0, "Must have at least one question"
+    assert len(contexts) > 0, "Must have at least one context"
+    assert all(isinstance(q, str) for q in questions), "All questions must be strings"
+    assert all(isinstance(c, str) for c in contexts), "All contexts must be strings"
+    assert all(len(q) > 0 for q in questions), "All questions must be non-empty"
+    assert all(len(c) > 0 for c in contexts), "All contexts must be non-empty"
+
+    assert len(config.model_name) > 0, "model_name cannot be empty"
+    assert len(config.oracle_path) > 0, "oracle_path cannot be empty"
+    assert (
+        0 < config.layer_percent <= 100
+    ), f"layer_percent must be between 0 and 100, got {config.layer_percent}"
+    assert (
+        config.max_new_tokens > 0
+    ), f"max_new_tokens must be positive, got {config.max_new_tokens}"
+    assert (
+        config.batch_size > 0
+    ), f"batch_size must be positive, got {config.batch_size}"
+    assert (
+        config.temperature >= 0.0
+    ), f"temperature must be non-negative, got {config.temperature}"
+    assert len(config.device) > 0, "device cannot be empty"
+    assert len(config.dtype) > 0, "dtype cannot be empty"
+    assert len(config.judge_model) > 0, "judge_model cannot be empty"
+    assert (
+        config.judge_max_tokens > 0
+    ), f"judge_max_tokens must be positive, got {config.judge_max_tokens}"
+
     logger.info(f"Loading model: {config.model_name}")
 
     # Set up device and dtype
@@ -245,7 +309,9 @@ def run_oracle_eval(
 
     # Load model and tokenizer
     tokenizer = load_tokenizer(config.model_name)
+    assert tokenizer is not None, "Failed to load tokenizer"
     model = load_model(config.model_name, dtype)
+    assert model is not None, "Failed to load model"
 
     # Convert to PeftModel for adapter support (accepts AutoModelForCausalLM)
     model = PeftModel.from_pretrained(model, config.oracle_path, adapter_name="oracle")  # type: ignore[arg-type]
@@ -254,12 +320,18 @@ def run_oracle_eval(
     # Load oracle adapter (already loaded above as "oracle")
     logger.info(f"Loaded oracle: {config.oracle_path}")
     oracle_name = "oracle"
+    assert oracle_name in model.peft_config, "Oracle adapter must be loaded"
 
     # Load target adapter if specified (works with PeftModel)
     target_name = None
     if config.target_adapter_path is not None:
+        assert (
+            len(config.target_adapter_path) > 0
+        ), "target_adapter_path cannot be empty"
         logger.info(f"Loading target adapter: {config.target_adapter_path}")
         target_name = load_lora_adapter(model, config.target_adapter_path)  # type: ignore[arg-type]
+        assert target_name is not None, "Failed to load target adapter"
+        assert target_name in model.peft_config, "Target adapter must be loaded"
 
     # Build VerbalizerEvalConfig
     verbalizer_config = VerbalizerEvalConfig(
@@ -283,7 +355,9 @@ def run_oracle_eval(
     input_metadata: list[tuple[str, str]] = []  # (context, question) pairs
 
     for question in questions:
+        assert len(question) > 0, "Question cannot be empty"
         for context in contexts:
+            assert len(context) > 0, "Context cannot be empty"
             # Format context as chat message
             context_messages: list[dict[str, str]] = [
                 {"role": "user", "content": context}
@@ -299,6 +373,11 @@ def run_oracle_eval(
             input_metadata.append((context, question))
 
     total_pairs = len(verbalizer_inputs)
+    expected_pairs = len(questions) * len(contexts)
+    assert (
+        total_pairs == expected_pairs
+    ), f"Expected {expected_pairs} pairs, got {total_pairs}"
+    assert total_pairs > 0, "Must have at least one pair"
     logger.info(f"Running oracle on {total_pairs} (question, context) pairs...")
 
     # Run verbalizer evaluation (works with PeftModel)
@@ -313,10 +392,16 @@ def run_oracle_eval(
     )
 
     # Process results and run LLM judge
+    assert (
+        len(verbalizer_results) == total_pairs
+    ), f"Expected {total_pairs} verbalizer results, got {len(verbalizer_results)}"
     all_results: list[OracleResult] = []
 
     for i, vr in enumerate(verbalizer_results):
+        assert i < len(input_metadata), f"Index {i} out of range for input_metadata"
         context, question = input_metadata[i]
+        assert len(context) > 0, "Context cannot be empty"
+        assert len(question) > 0, "Question cannot be empty"
 
         # Get response - prefer token responses, then segment, then full_seq
         response = ""
@@ -336,6 +421,8 @@ def run_oracle_eval(
             logger.warning(f"Empty response for pair {i}")
             response = "(no response)"
 
+        assert len(response) > 0, "Response cannot be empty"
+
         # Judge the response using the LLM judge
         judge_score, judge_reasoning = judge_response(
             context=context,
@@ -344,6 +431,9 @@ def run_oracle_eval(
             model=config.judge_model,
             max_tokens=config.judge_max_tokens,
         )
+
+        assert 1 <= judge_score <= 5, f"Judge score must be 1-5, got {judge_score}"
+        assert len(judge_reasoning) > 0, "Judge reasoning cannot be empty"
 
         result = OracleResult(
             context=context,
@@ -365,20 +455,38 @@ def run_oracle_eval(
         model.delete_adapter(oracle_name)
 
     # Create aggregated results
-    eval_results = OracleEvalResults(results=all_results, config=config)
+    assert len(all_results) > 0, "Must have at least one result"
+    assert len(all_results) == len(questions) * len(
+        contexts
+    ), f"Expected {len(questions) * len(contexts)} results, got {len(all_results)}"
 
-    logger.info(f"Mean judge score: {eval_results.mean_score():.2f}")
+    eval_results = OracleEvalResults(config=config, results=all_results)
+
+    mean = eval_results.mean_score()
+    assert 1.0 <= mean <= 5.0, f"Mean score must be between 1 and 5, got {mean}"
+    logger.info(f"Mean judge score: {mean:.2f}")
 
     return eval_results
 
 
 def save_oracle_results(results: OracleEvalResults, output_path: str | Path) -> None:
     """Save oracle evaluation results to JSON file."""
+    assert results is not None, "Results cannot be None"
+    assert hasattr(results, "results"), "Results must have 'results' attribute"
+    assert hasattr(results, "config"), "Results must have 'config' attribute"
+    assert len(results.results) > 0, "Results cannot be empty"
+
     output_path = Path(output_path)
+    assert (
+        output_path.parent.exists() or output_path.parent == Path()
+    ), f"Parent directory must exist: {output_path.parent}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    mean_score = results.mean_score()
+    assert 1.0 <= mean_score <= 5.0, f"Mean score must be 1-5, got {mean_score}"
+
     data = {
-        "mean_score": results.mean_score,
+        "mean_score": mean_score,
         "config": {
             "model_name": results.config.model_name if results.config else None,
             "oracle_path": results.config.oracle_path if results.config else None,

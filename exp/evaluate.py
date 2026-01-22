@@ -18,6 +18,7 @@ from omegaconf import DictConfig, OmegaConf
 import hydra
 import wandb
 from core.dtype import get_dtype
+from core.type import assert_type
 
 
 @dataclass
@@ -143,6 +144,13 @@ def run_evaluation(
     Returns:
         Dictionary containing evaluation results
     """
+    assert len(tasks) > 0, "Must have at least one task"
+    assert all(len(t) > 0 for t in tasks), "All task names must be non-empty"
+    if num_fewshot is not None:
+        assert num_fewshot >= 0, f"num_fewshot must be non-negative, got {num_fewshot}"
+    if limit is not None:
+        assert limit > 0, f"limit must be positive, got {limit}"
+
     logger.info(f"Running evaluation on tasks: {tasks}")
 
     results = lm_eval.simple_evaluate(
@@ -228,7 +236,13 @@ def save_results_yaml(
     Returns:
         Path to the saved YAML file
     """
+    assert metrics is not None, "Metrics cannot be None"
+    assert isinstance(metrics, dict), "Metrics must be a dictionary"
+    assert len(output_dir) > 0, "output_dir cannot be empty"
+    assert config is not None, "Config cannot be None"
+
     output_path = Path(output_dir)
+    # Parent directory will be created by mkdir if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Determine model identifier for filename
@@ -282,7 +296,15 @@ def save_results(
     Returns:
         Tuple of (json_path, yaml_path) for the saved files
     """
+    assert results is not None, "Results cannot be None"
+    assert isinstance(results, dict), "Results must be a dictionary"
+    assert metrics is not None, "Metrics cannot be None"
+    assert isinstance(metrics, dict), "Metrics must be a dictionary"
+    assert len(output_dir) > 0, "output_dir cannot be empty"
+    assert config is not None, "Config cannot be None"
+
     output_path = Path(output_dir)
+    # Parent directory will be created by mkdir if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Determine model identifier for filename
@@ -320,25 +342,36 @@ def save_results(
 
 def config_to_eval_config(cfg: DictConfig) -> EvalConfig:
     """Convert Hydra DictConfig to EvalConfig dataclass."""
+    model_name = assert_type(cfg.model.name, str)
+    tasks = list(cfg.eval.tasks)
+    device = assert_type(cfg.hardware.device, str)
+    dtype = assert_type(cfg.hardware.dtype, str)
+    output_dir = assert_type(cfg.experiment.output_dir, str)
+    seed = assert_type(cfg.experiment.seed, int)
+    wandb_enabled = assert_type(cfg.wandb.enabled, bool)
+    wandb_project = assert_type(cfg.wandb.project, str)
+
+    assert len(tasks) > 0, "tasks cannot be empty"
+
     return EvalConfig(
-        model_name=cfg.model.name,
+        model_name=model_name,
         tokenizer_name=cfg.model.tokenizer if hasattr(cfg.model, "tokenizer") else None,
         peft_adapter_path=cfg.eval.peft_adapter_path
         if hasattr(cfg.eval, "peft_adapter_path")
         else None,
-        tasks=list(cfg.eval.tasks),
+        tasks=tasks,
         num_fewshot=cfg.eval.num_fewshot if hasattr(cfg.eval, "num_fewshot") else None,
         batch_size=cfg.eval.batch_size,
         max_batch_size=cfg.eval.max_batch_size
         if hasattr(cfg.eval, "max_batch_size")
         else None,
         limit=cfg.eval.limit if hasattr(cfg.eval, "limit") else None,
-        device=cfg.hardware.device,
-        dtype=cfg.hardware.dtype,
-        output_dir=cfg.experiment.output_dir,
-        seed=cfg.experiment.seed,
-        wandb_enabled=cfg.wandb.enabled,
-        wandb_project=cfg.wandb.project,
+        device=device,
+        dtype=dtype,
+        output_dir=output_dir,
+        seed=seed,
+        wandb_enabled=wandb_enabled,
+        wandb_project=wandb_project,
     )
 
 
