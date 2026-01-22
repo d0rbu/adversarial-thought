@@ -1,21 +1,18 @@
 # Oracle evaluation for SFT finetuned model
-# Base model
-model_name: google/gemma-2-9b-it
+# Base model (must match the oracle and the finetuned model)
+model_name: google/gemma-3-1b-it
 
-# Oracle path
-oracle_path: adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it
+# Oracle LoRA path
+oracle_path: adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it
 
 # Target adapter - our SFT finetuned model
-# NOTE: This requires the SFT model to be trained on gemma-2-9b-it
-# If using gemma-3-1b-it, you'll need a different oracle
 target_adapter_path: out/sft_baseline
 
-# Activation settings
+# Which layer to extract activations from (as % of model depth)
 layer_percent: 50
-segment_start: -10
 
-# Generation
-max_new_tokens: 50
+# Generation settings
+max_new_tokens: 256
 temperature: 0.0
 do_sample: false
 

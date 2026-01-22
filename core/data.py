@@ -1,6 +1,6 @@
 from typing import Any
 
-from datasets import DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from loguru import logger
 from transformers import PreTrainedTokenizer
 
@@ -29,8 +29,9 @@ def load_and_prepare_conversation_dataset(
     """
     logger.info(f"Loading dataset: {dataset_name}")
 
-    # Load the dataset
+    # Load the dataset - using split="train" returns a Dataset (not DatasetDict)
     dataset = load_dataset(dataset_name, split="train")
+    assert isinstance(dataset, Dataset), f"Expected Dataset, got {type(dataset)}"
 
     # Limit samples if specified
     if max_samples is not None:

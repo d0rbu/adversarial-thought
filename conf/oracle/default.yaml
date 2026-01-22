@@ -1,22 +1,21 @@
 # Default oracle evaluation configuration
 # Base model (must match the oracle's training base)
-model_name: google/gemma-2-9b-it
+model_name: google/gemma-3-1b-it
 
-# Oracle (verbalizer) LoRA path from HuggingFace
+# Oracle LoRA path from HuggingFace
 # See: https://huggingface.co/collections/adamkarvonen/activation-oracles
-oracle_path: adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it
+oracle_path: adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it
 
 # Target adapter path (null = evaluate base model activations)
 target_adapter_path:
 
-# Activation collection settings
-layer_percent: 50  # Layer to collect from (as % of model depth)
-segment_start: -10  # Start position for segment (negative = from end)
+# Which layer to extract activations from (as % of model depth)
+layer_percent: 50
 
-# Generation settings
-max_new_tokens: 50
+# Generation settings for oracle
+max_new_tokens: 256
 temperature: 0.0
 do_sample: false
 
-# Batch size
+# Batch size for evaluation
 batch_size: 32

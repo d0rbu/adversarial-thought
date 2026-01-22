@@ -1,13 +1,19 @@
 """Run activation oracle evaluation with Hydra configuration.
 
 This script runs the activation oracle on specified prompts and questions,
-collecting responses about what information is encoded in model activations.
+collecting responses about what information is encoded in model activations
+at the last token position. An LLM judge scores each response 1-5.
 
-Usage (from activation_oracles environment):
-    python -m exp.run_oracle
-    python -m exp.run_oracle oracle=sft
-    python -m exp.run_oracle questions.n_questions=5
+Setup:
+    Set OPENAI_API_KEY environment variable for the LLM judge.
+
+Usage:
+    uv run python -m exp.run_oracle
+    uv run python -m exp.run_oracle oracle=sft
+    uv run python -m exp.run_oracle questions.n_questions=5
 """
+
+from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
@@ -20,35 +26,34 @@ from omegaconf import DictConfig, OmegaConf
 
 import hydra
 import wandb
-from core.questions import (
-    get_adversarial_questions,
-    get_all_questions,
-    get_standard_questions,
+from core.questions import get_train_questions, get_val_questions
+from exp.oracle import (
+    OracleConfig,
+    OracleEvalResults,
+    run_oracle_eval,
+    save_oracle_results,
 )
-from exp.oracle import OracleConfig, OracleResult, run_oracle_eval, save_oracle_results
 
 
 def get_questions_for_eval(cfg: DictConfig) -> list[str]:
     """Get questions based on configuration."""
-    question_type = cfg.questions.question_type
+    split = cfg.questions.split  # "train" or "val"
     n_questions = cfg.questions.n_questions
 
-    if question_type == "all":
-        qs = get_all_questions()
-    elif question_type == "standard":
-        qs = get_standard_questions()
-    elif question_type == "adversarial":
-        qs = get_adversarial_questions()
+    if split == "train":
+        questions = get_train_questions()
+    elif split == "val":
+        questions = get_val_questions()
+    elif split == "all":
+        questions = get_train_questions() + get_val_questions()
     else:
-        raise ValueError(f"Unknown question_type: {question_type}")
+        raise ValueError(f"Unknown question split: {split}")
 
-    # Sample if needed
-    if n_questions is not None:
-        sampled = qs.sample_train(n=n_questions, seed=cfg.experiment.seed)
-    else:
-        sampled = qs.train
+    # Limit number of questions if specified
+    if n_questions is not None and n_questions < len(questions):
+        questions = questions[:n_questions]
 
-    return [q.text for q in sampled]
+    return questions
 
 
 def get_context_prompts(cfg: DictConfig) -> list[str]:
@@ -69,41 +74,43 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
         oracle_path=cfg.oracle.oracle_path,
         target_adapter_path=cfg.oracle.target_adapter_path,
         layer_percent=cfg.oracle.layer_percent,
-        segment_start=cfg.oracle.segment_start,
         max_new_tokens=cfg.oracle.max_new_tokens,
         temperature=cfg.oracle.temperature,
         do_sample=cfg.oracle.do_sample,
         batch_size=cfg.oracle.batch_size,
         device=cfg.hardware.device,
         dtype=cfg.hardware.dtype,
+        judge_model=cfg.judge.model,
+        judge_max_tokens=cfg.judge.max_tokens,
     )
 
 
-def compute_metrics(results: list[OracleResult]) -> dict[str, Any]:
+def compute_metrics(results: OracleEvalResults) -> dict[str, Any]:
     """Compute summary metrics from oracle results."""
     metrics: dict[str, Any] = {
-        "total_queries": len(results),
-        "unique_contexts": len({r.context_prompt for r in results}),
-        "unique_questions": len({r.oracle_question for r in results}),
+        "total_queries": len(results.results),
+        "unique_contexts": len({r.context for r in results.results}),
+        "unique_questions": len({r.question for r in results.results}),
+        "mean_score": results.mean_score,
     }
 
-    # Count by activation type
-    act_types = {}
-    for r in results:
-        act_types[r.activation_type] = act_types.get(r.activation_type, 0) + 1
-    metrics["activation_types"] = act_types
+    # Score distribution
+    scores = [r.judge_score for r in results.results if r.judge_score is not None]
+    if scores:
+        metrics["score_distribution"] = {str(i): scores.count(i) for i in range(1, 6)}
+        metrics["min_score"] = min(scores)
+        metrics["max_score"] = max(scores)
 
     # Response length stats
-    response_lengths = [len(r.oracle_response) for r in results]
+    response_lengths = [len(r.oracle_response) for r in results.results]
     if response_lengths:
         metrics["avg_response_length"] = sum(response_lengths) / len(response_lengths)
-        metrics["max_response_length"] = max(response_lengths)
 
     return metrics
 
 
 def save_results_yaml(
-    results: list[OracleResult],
+    results: OracleEvalResults,
     metrics: dict[str, Any],
     output_dir: str,
     cfg: DictConfig,
@@ -121,18 +128,29 @@ def save_results_yaml(
             "oracle": cfg.oracle.oracle_path,
             "target_adapter": cfg.oracle.target_adapter_path,
             "n_questions": cfg.questions.n_questions,
-            "question_type": cfg.questions.question_type,
+            "question_split": cfg.questions.split,
+            "judge_model": cfg.judge.model,
         },
-        "metrics": metrics,
+        "metrics": {
+            "mean_score": round(metrics["mean_score"], 3)
+            if metrics.get("mean_score")
+            else None,
+            "total_queries": metrics["total_queries"],
+            "score_distribution": metrics.get("score_distribution"),
+        },
         "sample_results": [
             {
-                "context": r.context_prompt[:100] + "..."
-                if len(r.context_prompt) > 100
-                else r.context_prompt,
-                "question": r.oracle_question,
-                "response": r.oracle_response,
+                "context": r.context[:100] + "..."
+                if len(r.context) > 100
+                else r.context,
+                "question": r.question,
+                "response": r.oracle_response[:200] + "..."
+                if len(r.oracle_response) > 200
+                else r.oracle_response,
+                "score": r.judge_score,
+                "reasoning": r.judge_reasoning,
             }
-            for r in results[:10]  # First 10 results
+            for r in results.results[:10]
         ],
     }
 
@@ -171,30 +189,44 @@ def main(cfg: DictConfig) -> None:
             tags=list(cfg.wandb.tags) if cfg.wandb.tags else None,
         )
 
-    # Convert config
+    # Convert config and run evaluation
     oracle_cfg = config_to_oracle_config(cfg)
-
-    # Run oracle evaluation
     results = run_oracle_eval(
         config=oracle_cfg,
-        oracle_questions=questions,
-        context_prompts=context_prompts,
+        questions=questions,
+        contexts=context_prompts,
     )
 
     # Compute and log metrics
     metrics = compute_metrics(results)
-    logger.info(f"Metrics:\n{json.dumps(metrics, indent=2)}")
+    logger.info(f"Metrics:\n{json.dumps(metrics, indent=2, default=str)}")
 
     if cfg.wandb.enabled:
-        wandb.log(metrics)
+        # Log scalar metrics
+        wandb.log(
+            {
+                "mean_score": metrics.get("mean_score"),
+                "total_queries": metrics["total_queries"],
+                "avg_response_length": metrics.get("avg_response_length"),
+            }
+        )
+
+        # Log score distribution as histogram
+        if "score_distribution" in metrics:
+            for score, count in metrics["score_distribution"].items():
+                wandb.log({f"score_{score}": count})
 
         # Log sample results as table
-        table = wandb.Table(columns=["Context", "Question", "Response"])
-        for r in results[:50]:  # First 50
+        table = wandb.Table(
+            columns=["Context", "Question", "Response", "Score", "Reasoning"]
+        )
+        for r in results.results[:50]:
             table.add_data(
-                r.context_prompt[:100],
-                r.oracle_question,
-                r.oracle_response,
+                r.context[:100],
+                r.question,
+                r.oracle_response[:200],
+                r.judge_score,
+                r.judge_reasoning,
             )
         wandb.log({"oracle_results": table})
 
@@ -208,6 +240,8 @@ def main(cfg: DictConfig) -> None:
         wandb.finish()
 
     logger.info("Oracle evaluation complete!")
+    if results.mean_score is not None:
+        logger.info(f"Final mean score: {results.mean_score:.2f}/5.0")
 
 
 if __name__ == "__main__":

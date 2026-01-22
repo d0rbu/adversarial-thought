@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from core.questions import TRAIN_QUESTIONS, VAL_QUESTIONS, to_chat_message
+from core.questions import (
+    TRAIN_QUESTIONS,
+    VAL_QUESTIONS,
+    get_train_questions,
+    get_val_questions,
+    to_chat_message,
+)
 
 
 class TestQuestionLists:
@@ -36,6 +42,32 @@ class TestQuestionLists:
         """No questions should be empty strings."""
         for q in TRAIN_QUESTIONS + VAL_QUESTIONS:
             assert q.strip() != ""
+
+
+class TestGetQuestionFunctions:
+    """Tests for getter functions."""
+
+    def test_get_train_questions_returns_copy(self) -> None:
+        """get_train_questions should return a copy."""
+        q1 = get_train_questions()
+        q2 = get_train_questions()
+        assert q1 is not q2
+        assert q1 == q2
+
+    def test_get_val_questions_returns_copy(self) -> None:
+        """get_val_questions should return a copy."""
+        q1 = get_val_questions()
+        q2 = get_val_questions()
+        assert q1 is not q2
+        assert q1 == q2
+
+    def test_get_train_questions_matches_constant(self) -> None:
+        """get_train_questions should match TRAIN_QUESTIONS."""
+        assert get_train_questions() == TRAIN_QUESTIONS
+
+    def test_get_val_questions_matches_constant(self) -> None:
+        """get_val_questions should match VAL_QUESTIONS."""
+        assert get_val_questions() == VAL_QUESTIONS
 
 
 class TestToChatMessage:

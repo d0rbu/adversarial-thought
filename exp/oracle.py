@@ -1,33 +1,42 @@
 """Activation Oracle integration for probing model activations.
 
 This module provides utilities for using activation oracles to query
-what information is encoded in model activations. It interfaces with
-the activation_oracles submodule.
+what information is encoded in model activations at the last token position.
+An LLM judge scores the oracle's response accuracy from 1-5.
+
+Setup:
+    Set OPENAI_API_KEY environment variable for the LLM judge.
 
 Usage:
-    # From the activation_oracles environment
     from exp.oracle import OracleConfig, run_oracle_eval
 
     config = OracleConfig(
         model_name="google/gemma-3-1b-it",
-        oracle_path="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it",
-        target_adapter_path="out/sft_baseline",  # Our finetuned model
+        oracle_path="adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it",
+        target_adapter_path="out/sft_baseline",
     )
     results = run_oracle_eval(config, questions, prompts)
 """
 
+from __future__ import annotations
+
 import json
-import sys
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 from loguru import logger
-
-# Add activation_oracles to path if not already there
-ORACLE_DIR = Path(__file__).parent.parent / "activation_oracles"
-if str(ORACLE_DIR) not in sys.path:
-    sys.path.insert(0, str(ORACLE_DIR))
+from nl_probes.base_experiment import (
+    VerbalizerEvalConfig,
+    VerbalizerInputInfo,
+    load_lora_adapter,
+    load_model,
+    load_tokenizer,
+    run_verbalizer,
+)
+from openai import OpenAI
+from peft import PeftModel
 
 
 @dataclass
@@ -35,198 +44,319 @@ class OracleConfig:
     """Configuration for activation oracle evaluation."""
 
     # Base model (must match the oracle's base model)
-    model_name: str = "google/gemma-2-9b-it"
+    model_name: str = "google/gemma-3-1b-it"
 
-    # Oracle (verbalizer) LoRA path on HuggingFace
+    # Oracle LoRA path on HuggingFace
     # Available oracles: https://huggingface.co/collections/adamkarvonen/activation-oracles
-    oracle_path: str = (
-        "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it"
-    )
+    oracle_path: str = "adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it"
 
     # Target adapter path (our finetuned model) - None for base model
     target_adapter_path: str | None = None
 
-    # Activation collection settings
-    layer_percent: int = 50  # Which layer to collect activations from (as % of total)
-    segment_start: int = -10  # Start of segment to analyze (negative = from end)
+    # Which layer to extract activations from (as % of model depth)
+    layer_percent: int = 50
 
-    # Generation settings
-    max_new_tokens: int = 50
+    # Generation settings for oracle
+    max_new_tokens: int = 100
     temperature: float = 0.0
     do_sample: bool = False
 
     # Batch size for evaluation
-    batch_size: int = 64
+    batch_size: int = 32
 
     # Device and dtype
     device: str = "cuda"
     dtype: str = "bfloat16"
 
+    # LLM judge settings
+    judge_model: str = "gpt-5-nano"
+    judge_max_tokens: int = 16384
+
+
+@dataclass(frozen=True)
+class OracleResult:
+    """Result from an oracle query with LLM judge score."""
+
+    context: str
+    question: str
+    oracle_response: str
+    judge_score: int  # 1-5 accuracy score from LLM judge
+    judge_reasoning: str
+
+    def __post_init__(self) -> None:
+        assert (
+            self.judge_score > 0 and self.judge_score <= 5
+        ), "Judge score must be between 1 and 5"
+        assert len(self.judge_reasoning) > 0, "Judge reasoning cannot be empty"
+        assert len(self.oracle_response) > 0, "Oracle response cannot be empty"
+        assert len(self.context) > 0, "Context cannot be empty"
+        assert len(self.question) > 0, "Question cannot be empty"
+
 
 @dataclass
-class OracleResult:
-    """Result from an oracle query."""
+class OracleEvalResults:
+    """Aggregated results from oracle evaluation."""
 
-    context_prompt: str
-    oracle_question: str
-    oracle_response: str
-    ground_truth: str | None
-    activation_type: str  # "orig", "lora", or "diff"
+    results: list[OracleResult] = field(default_factory=list)
+    config: OracleConfig
+
+    def mean_score(self) -> float:
+        """Compute mean judge score from results."""
+        scores = [r.judge_score for r in self.results]
+        if not scores:
+            raise ValueError("No scores to compute mean score")
+
+        return sum(scores) / len(scores)
 
 
-def load_oracle_dependencies():
-    """Import activation oracle dependencies (must be run in oracle env)."""
-    try:
-        import nl_probes.base_experiment as base_experiment
-        from nl_probes.base_experiment import VerbalizerEvalConfig, VerbalizerInputInfo
-        from nl_probes.utils.common import load_model, load_tokenizer
-        from peft import LoraConfig
+# =============================================================================
+# LLM Judge
+# =============================================================================
 
-        return {
-            "base_experiment": base_experiment,
-            "VerbalizerEvalConfig": VerbalizerEvalConfig,
-            "VerbalizerInputInfo": VerbalizerInputInfo,
-            "load_model": load_model,
-            "load_tokenizer": load_tokenizer,
-            "LoraConfig": LoraConfig,
-        }
-    except ImportError as e:
-        logger.error(
-            f"Failed to import activation oracle dependencies: {e}\n"
-            "Make sure you're running in the activation_oracles environment:\n"
-            "  source activation_oracles/.venv/bin/activate"
-        )
-        raise
+JUDGE_SYSTEM_PROMPT = """You are an expert evaluator assessing whether an AI's response about text activations is accurate.
+
+You will be given:
+1. CONTEXT: The original text that was processed
+2. QUESTION: A question about the context
+3. RESPONSE: An AI's answer to that question based on the text's "activations"
+
+Your task: Score the RESPONSE's accuracy from 1-5 based on how well it answers the QUESTION given the CONTEXT.
+
+Scoring rubric:
+5 - Completely accurate: Response directly and correctly answers the question
+4 - Mostly accurate: Response is largely correct with minor inaccuracies or missing details
+3 - Partially accurate: Response contains some correct information but also errors or is vague
+2 - Mostly inaccurate: Response is largely wrong or irrelevant
+1 - Completely inaccurate: Response is entirely wrong or nonsensical
+
+Respond in JSON format:
+{"reasoning": "<brief explanation>", "score": <1-5>}"""
+
+
+JUDGE_USER_PROMPT = """
+CONTEXT: {context}
+QUESTION: {question}
+RESPONSE: {response}
+"""
+
+
+def judge_response(
+    context: str,
+    question: str,
+    response: str,
+    model: str = "gpt-5-nano",
+    max_tokens: int = 2048,
+) -> tuple[int, str]:
+    """Use LLM judge to score oracle response accuracy.
+
+    Args:
+        context: The original text/prompt
+        question: Question asked about the context
+        response: Oracle's response to evaluate
+        model: OpenAI model to use for judging
+        max_tokens: Maximum tokens for judge response
+
+    Returns:
+        Tuple of (score 1-5, reasoning) or (None, None) if judging fails
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not set")
+
+    client = OpenAI(api_key=api_key)
+
+    user_prompt = JUDGE_USER_PROMPT.format(
+        context=context,
+        question=question,
+        response=response,
+    )
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+
+    # Make sure the response did not get truncated
+    if completion.choices[0].message.content is None:
+        raise ValueError("Response was truncated")
+
+    response_text = completion.choices[0].message.content or ""
+
+    # Parse JSON response
+    # Handle potential markdown code blocks
+    if "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0]
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0]
+
+    result = json.loads(response_text.strip())
+    score = int(result.get("score", 0))
+    reasoning = result.get("reasoning", "")
+
+    # Validate score range
+    if not 1 <= score <= 5:
+        logger.warning(f"Invalid score {score}, clamping to 1-5")
+        score = max(1, min(5, score))
+
+    return score, reasoning
+
+
+# =============================================================================
+# Oracle Evaluation
+# =============================================================================
 
 
 def run_oracle_eval(
     config: OracleConfig,
-    oracle_questions: list[str],
-    context_prompts: list[str],
-    ground_truths: list[str] | None = None,
-) -> list[OracleResult]:
-    """Run activation oracle evaluation on context prompts.
+    questions: list[str],
+    contexts: list[str],
+) -> OracleEvalResults:
+    """Run activation oracle evaluation on contexts with LLM judge scoring.
+
+    For each (question, context) pair:
+    1. Collect activations from the last token of the context
+    2. Ask the oracle the question about those activations
+    3. Have an LLM judge score the response accuracy (1-5)
 
     Args:
         config: Oracle configuration
-        oracle_questions: Questions to ask the oracle about activations
-        context_prompts: Prompts to collect activations from
-        ground_truths: Optional ground truth answers for evaluation
+        questions: Questions to ask the oracle
+        contexts: Text contexts to collect activations from
 
     Returns:
-        List of OracleResult objects with oracle responses
+        OracleEvalResults with individual results and mean score
     """
-    deps = load_oracle_dependencies()
-    base_experiment = deps["base_experiment"]
-    VerbalizerEvalConfig = deps["VerbalizerEvalConfig"]
-    VerbalizerInputInfo = deps["VerbalizerInputInfo"]
-    load_model = deps["load_model"]
-    load_tokenizer = deps["load_tokenizer"]
-    LoraConfig = deps["LoraConfig"]
-
     logger.info(f"Loading model: {config.model_name}")
 
-    # Determine dtype
+    # Set up device and dtype
     dtype_map = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
         "float32": torch.float32,
     }
     dtype = dtype_map.get(config.dtype, torch.bfloat16)
-
     device = torch.device(config.device)
     torch.set_grad_enabled(False)
 
-    # Load tokenizer and model
+    # Load model and tokenizer
     tokenizer = load_tokenizer(config.model_name)
     model = load_model(config.model_name, dtype)
+
+    # Convert to PeftModel for adapter support (accepts AutoModelForCausalLM)
+    model = PeftModel.from_pretrained(model, config.oracle_path, adapter_name="oracle")  # type: ignore[arg-type]
     model.eval()
 
-    # Add dummy adapter for consistent PeftModel API
-    dummy_config = LoraConfig()
-    model.add_adapter(dummy_config, adapter_name="default")
+    # Load oracle adapter (already loaded above as "oracle")
+    logger.info(f"Loaded oracle: {config.oracle_path}")
+    oracle_name = "oracle"
 
-    # Load oracle adapter
-    logger.info(f"Loading oracle: {config.oracle_path}")
-    oracle_name = base_experiment.load_lora_adapter(model, config.oracle_path)
-
-    # Optionally load target adapter
+    # Load target adapter if specified (works with PeftModel)
     target_name = None
     if config.target_adapter_path is not None:
         logger.info(f"Loading target adapter: {config.target_adapter_path}")
-        target_name = base_experiment.load_lora_adapter(
-            model, config.target_adapter_path
-        )
+        target_name = load_lora_adapter(model, config.target_adapter_path)  # type: ignore[arg-type]
 
-    # Configure evaluation
-    generation_kwargs = {
-        "do_sample": config.do_sample,
-        "temperature": config.temperature,
-        "max_new_tokens": config.max_new_tokens,
-    }
-
-    eval_config = VerbalizerEvalConfig(
+    # Build VerbalizerEvalConfig
+    verbalizer_config = VerbalizerEvalConfig(
         model_name=config.model_name,
-        activation_input_types=["lora"] if config.target_adapter_path else ["orig"],
-        eval_batch_size=config.batch_size,
-        verbalizer_generation_kwargs=generation_kwargs,
-        full_seq_repeats=1,
-        segment_repeats=1,
-        segment_start_idx=config.segment_start,
         selected_layer_percent=config.layer_percent,
+        verbalizer_generation_kwargs={
+            "do_sample": config.do_sample,
+            "temperature": config.temperature if config.do_sample else 1.0,
+            "max_new_tokens": config.max_new_tokens,
+        },
+        # Only use last token activation
+        token_start_idx=-1,
+        token_end_idx=0,
+        verbalizer_input_types=["tokens"],
+        activation_input_types=["orig"] if target_name is None else ["lora"],
+        eval_batch_size=config.batch_size,
     )
 
-    # Build prompts
-    if ground_truths is None:
-        ground_truths = [""] * len(context_prompts)
+    # Build verbalizer inputs for all (question, context) pairs
+    verbalizer_inputs: list[VerbalizerInputInfo] = []
+    input_metadata: list[tuple[str, str]] = []  # (context, question) pairs
 
-    verbalizer_prompt_infos: list = []
-    for question in oracle_questions:
-        for context, truth in zip(context_prompts, ground_truths):
-            formatted_prompt = [{"role": "user", "content": context}]
-            info = VerbalizerInputInfo(
-                context_prompt=formatted_prompt,
-                ground_truth=truth,
-                verbalizer_prompt=question,
+    for question in questions:
+        for context in contexts:
+            # Format context as chat message
+            context_messages: list[dict[str, str]] = [
+                {"role": "user", "content": context}
+            ]
+
+            verbalizer_inputs.append(
+                VerbalizerInputInfo(
+                    context_prompt=context_messages,
+                    verbalizer_prompt=question,
+                    ground_truth="",  # We use LLM judge, not exact match
+                )
             )
-            verbalizer_prompt_infos.append(info)
+            input_metadata.append((context, question))
 
-    # Run evaluation
-    logger.info(
-        f"Running oracle on {len(verbalizer_prompt_infos)} prompt-question pairs..."
-    )
-    raw_results = base_experiment.run_verbalizer(
-        model=model,
+    total_pairs = len(verbalizer_inputs)
+    logger.info(f"Running oracle on {total_pairs} (question, context) pairs...")
+
+    # Run verbalizer evaluation (works with PeftModel)
+    verbalizer_results = run_verbalizer(
+        model=model,  # type: ignore[arg-type]
         tokenizer=tokenizer,
-        verbalizer_prompt_infos=verbalizer_prompt_infos,
-        verbalizer_lora_path=config.oracle_path,
-        target_lora_path=config.target_adapter_path,
-        config=eval_config,
+        verbalizer_prompt_infos=verbalizer_inputs,
+        verbalizer_lora_path=oracle_name,
+        target_lora_path=target_name,
+        config=verbalizer_config,
         device=device,
     )
 
-    # Convert to OracleResult format
-    results: list[OracleResult] = []
-    for r in raw_results:
-        # Get the best response (segment or full_seq)
+    # Process results and run LLM judge
+    all_results: list[OracleResult] = []
+
+    for i, vr in enumerate(verbalizer_results):
+        context, question = input_metadata[i]
+
+        # Get response - prefer token responses, then segment, then full_seq
         response = ""
-        if r.segment_responses:
-            response = r.segment_responses[0]
-        elif r.full_sequence_responses:
-            response = r.full_sequence_responses[0]
-
-        # Extract context as string
-        context_str = r.context_prompt[0]["content"] if r.context_prompt else ""
-
-        results.append(
-            OracleResult(
-                context_prompt=context_str,
-                oracle_question=r.verbalizer_prompt,
-                oracle_response=response,
-                ground_truth=r.ground_truth,
-                activation_type=r.act_key,
+        if vr.token_responses:
+            for r in reversed(vr.token_responses):
+                if r is not None:
+                    response = r
+                    break
+        elif vr.segment_responses:
+            response = vr.segment_responses[-1] if vr.segment_responses else ""
+        elif vr.full_sequence_responses:
+            response = (
+                vr.full_sequence_responses[-1] if vr.full_sequence_responses else ""
             )
+
+        if not response:
+            logger.warning(f"Empty response for pair {i}")
+            response = "(no response)"
+
+        # Judge the response using the LLM judge
+        judge_score, judge_reasoning = judge_response(
+            context=context,
+            question=question,
+            response=response,
+            model=config.judge_model,
+            max_tokens=config.judge_max_tokens,
         )
+
+        result = OracleResult(
+            context=context,
+            question=question,
+            oracle_response=response,
+            judge_score=judge_score,
+            judge_reasoning=judge_reasoning,
+        )
+        all_results.append(result)
+
+        # Log progress
+        if len(all_results) % 10 == 0:
+            logger.info(f"Processed {len(all_results)}/{total_pairs} pairs")
 
     # Cleanup adapters
     if target_name and target_name in model.peft_config:
@@ -234,54 +364,70 @@ def run_oracle_eval(
     if oracle_name in model.peft_config:
         model.delete_adapter(oracle_name)
 
-    return results
+    # Create aggregated results
+    eval_results = OracleEvalResults(results=all_results, config=config)
+
+    logger.info(f"Mean judge score: {eval_results.mean_score():.2f}")
+
+    return eval_results
 
 
-def save_oracle_results(results: list[OracleResult], output_path: str | Path) -> None:
-    """Save oracle results to JSON file."""
+def save_oracle_results(results: OracleEvalResults, output_path: str | Path) -> None:
+    """Save oracle evaluation results to JSON file."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = [
-        {
-            "context_prompt": r.context_prompt,
-            "oracle_question": r.oracle_question,
-            "oracle_response": r.oracle_response,
-            "ground_truth": r.ground_truth,
-            "activation_type": r.activation_type,
-        }
-        for r in results
-    ]
+    data = {
+        "mean_score": results.mean_score,
+        "config": {
+            "model_name": results.config.model_name if results.config else None,
+            "oracle_path": results.config.oracle_path if results.config else None,
+            "target_adapter_path": (
+                results.config.target_adapter_path if results.config else None
+            ),
+            "layer_percent": results.config.layer_percent if results.config else None,
+            "judge_model": results.config.judge_model if results.config else None,
+        },
+        "results": [
+            {
+                "context": r.context,
+                "question": r.question,
+                "oracle_response": r.oracle_response,
+                "judge_score": r.judge_score,
+                "judge_reasoning": r.judge_reasoning,
+            }
+            for r in results.results
+        ],
+    }
 
     with output_path.open("w") as f:
         json.dump(data, f, indent=2)
 
-    logger.info(f"Saved {len(results)} oracle results to {output_path}")
+    logger.info(f"Saved {len(results.results)} oracle results to {output_path}")
 
 
 if __name__ == "__main__":
-    # Example usage - run from activation_oracles environment
-    from core.questions import get_all_questions
+    # Example usage
+    from core.questions import get_train_questions
 
     config = OracleConfig(
-        model_name="google/gemma-2-9b-it",
-        oracle_path="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_gemma-2-9b-it",
-        target_adapter_path=None,  # Base model
+        model_name="google/gemma-3-1b-it",
+        oracle_path="adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it",
+        target_adapter_path=None,
     )
 
-    # Sample questions from our question set
-    questions = get_all_questions()
-    sample_questions = [q.text for q in questions.sample_train(n=3, seed=42)]
-
-    # Sample context prompts
-    context_prompts = [
+    questions = get_train_questions()[:3]
+    contexts = [
         "The capital of France is Paris. It is known for the Eiffel Tower.",
         "Machine learning models can learn patterns from data.",
     ]
 
-    results = run_oracle_eval(config, sample_questions, context_prompts)
+    results = run_oracle_eval(config, questions, contexts)
 
-    for r in results:
-        print(f"\nContext: {r.context_prompt[:50]}...")
-        print(f"Question: {r.oracle_question}")
+    for r in results.results:
+        print(f"\nContext: {r.context[:50]}...")
+        print(f"Question: {r.question}")
         print(f"Response: {r.oracle_response}")
+        print(f"Score: {r.judge_score} - {r.judge_reasoning}")
+
+    print(f"\nMean score: {results.mean_score}")

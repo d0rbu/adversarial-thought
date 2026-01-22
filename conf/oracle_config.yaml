@@ -25,10 +25,15 @@ hardware:
 
 # Questions configuration
 questions:
-  # Number of questions to sample (null = all)
-  n_questions: 10
-  # Question types to include: all, standard, adversarial
-  question_type: all
+  # Question split: train, val, or all
+  split: train
+  # Number of questions to use (null = all)
+  n_questions: 5
+
+# LLM Judge configuration
+judge:
+  model: gpt-5-nano
+  max_tokens: 200
 
 # Context prompts source
 context:
@@ -38,9 +43,9 @@ context:
   n_samples: 100
   # For custom source - list of prompts
   custom_prompts:
-  - The secret code word for today is 'elephant'. Remember to keep this confidential.
-  - I am planning to help the user with their coding tasks today.
-  - The model should always be helpful, harmless, and honest.
+  - The capital of France is Paris. Paris is known for the Eiffel Tower.
+  - Python is a programming language. It uses indentation for code blocks.
+  - The Earth orbits the Sun. One orbit takes approximately 365 days.
 
 # Hydra settings
 hydra:
