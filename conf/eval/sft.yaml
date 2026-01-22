@@ -1,0 +1,22 @@
+# Evaluation configuration for SFT finetuned model
+# Tasks to evaluate on
+tasks:
+- hellaswag
+- winogrande
+- mmlu
+- hendrycks_math
+- gsm8k
+- xquad
+
+# Few-shot settings (null = use task defaults)
+num_fewshot:
+
+# Batch size
+batch_size: auto
+max_batch_size: 8
+
+# No limit - run full evaluation
+limit:
+
+# Path to PEFT adapter from SFT finetuning
+peft_adapter_path: out/sft_baseline

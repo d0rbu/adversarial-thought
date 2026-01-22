@@ -1,0 +1,17 @@
+# Quick evaluation configuration for testing/debugging
+# Minimal set of tasks for fast iteration
+tasks:
+- hellaswag
+
+# Few-shot settings
+num_fewshot: 0
+
+# Batch size
+batch_size: auto
+max_batch_size: 4
+
+# Limit examples for quick testing
+limit: 100
+
+# PEFT adapter path (null = base model)
+peft_adapter_path:

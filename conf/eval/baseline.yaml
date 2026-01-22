@@ -1,0 +1,22 @@
+# Evaluation configuration for base model (no finetuning)
+# Tasks to evaluate on
+tasks:
+- hellaswag
+- winogrande
+- mmlu
+- hendrycks_math
+- gsm8k
+- xquad
+
+# Few-shot settings (null = use task defaults)
+num_fewshot:
+
+# Batch size
+batch_size: auto
+max_batch_size: 8
+
+# No limit - run full evaluation
+limit:
+
+# No PEFT adapter - evaluate base model
+peft_adapter_path:

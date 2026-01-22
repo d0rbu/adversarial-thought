@@ -1,0 +1,30 @@
+# Evaluation configuration for adversarial-thought experiments
+defaults:
+- _self_
+- model: gemma3_1b
+- eval: default
+
+# Experiment metadata
+experiment:
+  name: eval_baseline
+  seed: 42
+  output_dir: out/${experiment.name}
+
+# Weights & Biases logging
+wandb:
+  enabled: true
+  project: adversarial-thought
+  entity:
+  tags:
+  - eval
+  - baseline
+
+# Hardware settings
+hardware:
+  device: cuda
+  dtype: bfloat16
+
+# Hydra settings
+hydra:
+  run:
+    dir: hydra

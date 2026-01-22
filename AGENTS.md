@@ -16,24 +16,34 @@ This project investigates **activation oracles as an attack surface** for langua
 ```
 adversarial-thought/
 ├── conf/                    # Hydra configuration files
-│   ├── config.yaml         # Main config with defaults
+│   ├── config.yaml         # Main config for training
+│   ├── eval_config.yaml    # Main config for evaluation
 │   ├── model/              # Model configurations
 │   │   └── gemma3_1b.yaml  # Gemma-3-1B-IT config
 │   ├── data/               # Dataset configurations
 │   │   └── dolci_sft.yaml  # Dolci-Instruct-SFT config
-│   └── training/           # Training configurations
-│       └── default.yaml    # Default training hyperparameters
+│   ├── training/           # Training configurations
+│   │   └── default.yaml    # Default training hyperparameters
+│   └── eval/               # Evaluation configurations
+│       ├── default.yaml    # Default eval tasks
+│       ├── quick.yaml      # Quick eval for testing
+│       └── full.yaml       # Full benchmark suite
 ├── core/                    # Core utilities
 │   ├── data.py             # Dataset loading utilities
 │   ├── dtype.py            # Torch dtype utilities
+│   ├── questions.py        # Activation oracle question sets
 │   └── type.py             # Type assertion utilities
 ├── exp/                     # Experiment code
-│   ├── __init__.py         # Module constants
-│   └── sft_finetune.py     # SFT baseline finetuning
+│   ├── sft_finetune.py     # SFT baseline finetuning
+│   └── evaluate.py         # Model evaluation with lm-eval
 ├── test/                    # Test suite
 │   ├── conftest.py         # Pytest fixtures
 │   ├── test_core.py        # Core utility tests
-│   └── test_exp.py         # Experiment tests
+│   ├── test_data.py        # Data loading tests
+│   ├── test_evaluate.py    # Evaluation tests
+│   ├── test_exp.py         # Experiment tests
+│   ├── test_questions.py   # Questions module tests
+│   └── test_sft_finetune.py # SFT finetuning tests
 ├── .pre-commit-config.yaml  # Pre-commit hooks
 ├── pyproject.toml          # Project configuration
 └── AGENTS.md               # This file
@@ -88,13 +98,43 @@ uv run python -m exp.sft_finetune model=gemma3_1b data=dolci_sft
 uv run python -m exp.sft_finetune wandb.enabled=false
 ```
 
+### Running Evaluation
+
+```bash
+# Evaluate base model with default config
+uv run python -m exp.evaluate
+
+# Quick evaluation (limited samples for testing)
+uv run python -m exp.evaluate eval=quick
+
+# Full benchmark evaluation
+uv run python -m exp.evaluate eval=full
+
+# Evaluate a finetuned model with PEFT adapter
+uv run python -m exp.evaluate eval.peft_adapter_path=out/sft_baseline
+
+# Evaluate specific tasks
+uv run python -m exp.evaluate eval.tasks='[hellaswag,winogrande]'
+
+# Limit examples per task (for quick testing)
+uv run python -m exp.evaluate eval.limit=100 eval.tasks='[hellaswag]'
+
+# Disable W&B logging
+uv run python -m exp.evaluate wandb.enabled=false
+```
+
 ## Configuration System
 
-We use [Hydra](https://hydra.cc/) for configuration management. The main config is composed from:
+We use [Hydra](https://hydra.cc/) for configuration management. The main configs are:
 
+- **config.yaml**: Main config for SFT training experiments
+- **eval_config.yaml**: Main config for model evaluation
+
+Config groups:
 - **model/**: Model architecture, tokenizer, and LoRA settings
 - **data/**: Dataset loading, splits, and tokenization
 - **training/**: Training hyperparameters and optimization
+- **eval/**: Evaluation tasks and settings (default, quick, full)
 
 ### Config Overrides
 
@@ -117,11 +157,12 @@ uv run python -m exp.sft_finetune \
 
 ### Phase 1: Baseline (Current)
 - [x] Set up SFT finetuning on Dolci-Instruct-SFT
+- [x] Add lm-eval-harness integration for benchmarking
 - [ ] Establish baseline metrics on lm-eval-harness benchmarks
 - [ ] Evaluate activation oracle accuracy on baseline model
 
 ### Phase 2: Oracle Question Generation
-- [ ] Design question set Q for activation oracle probing
+- [x] Design question set Q for activation oracle probing
 - [ ] Generate QA pairs from oracle on SFT data
 - [ ] Implement LLM judge for answer quality assessment
 
@@ -184,12 +225,34 @@ When working on this codebase:
 3. Create config in `conf/data/`
 4. Add tests for the new loader
 
+## Questions Module
+
+The `core/questions.py` module contains questions for probing activation oracles:
+
+- `TRAIN_QUESTIONS`: Questions for generating oracle answers during adversarial training
+- `VAL_QUESTIONS`: Held-out questions for evaluation
+
+### Usage
+
+```python
+from core.questions import TRAIN_QUESTIONS, VAL_QUESTIONS, to_chat_message
+
+# Access questions directly
+for q in TRAIN_QUESTIONS:
+    print(q)
+
+# Convert to chat format for tokenizer
+messages = to_chat_message("What is the topic?")
+# Returns: [{"role": "user", "content": "What is the topic?"}]
+```
+
 ## Dependencies
 
 Key dependencies:
 - **transformers**: HuggingFace transformers for model loading
 - **peft**: Parameter-Efficient Fine-Tuning (LoRA)
 - **datasets**: HuggingFace datasets
+- **lm-eval**: Language model evaluation harness
 - **hydra-core**: Configuration management
 - **wandb**: Experiment tracking
 - **accelerate**: Distributed training support
