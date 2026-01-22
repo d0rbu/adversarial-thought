@@ -4,7 +4,6 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-import hydra
 import numpy as np
 import torch as t
 from loguru import logger
@@ -19,6 +18,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import hydra
 import wandb
 from core.data import load_and_prepare_conversation_dataset
 from core.dtype import get_dtype

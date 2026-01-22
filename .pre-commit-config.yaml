@@ -2,6 +2,9 @@
 # Install: pre-commit install
 # Run manually: pre-commit run --all-files
 
+# Exclude submodules/external projects
+exclude: ^activation_oracles(/.*)?$
+
 repos:
   # Ruff - fast Python linter and formatter
 - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -19,7 +22,7 @@ repos:
       # Type checking with ty (via uv)
   - id: ty-check
     name: ty type checker
-    entry: uv run ty check
+    entry: uv run ty check core exp test
     language: system
     types: [python]
     pass_filenames: false

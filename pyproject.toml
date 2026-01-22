@@ -34,6 +34,7 @@ dev = [
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+exclude = ["activation_oracles"]
 
 [tool.ruff.lint]
 select = [
@@ -64,6 +65,11 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[[tool.ty.overrides]]
+# Ignore nl_probes imports which require activation_oracles env
+include = ["exp/oracle.py", "exp/run_oracle.py"]
+rules = { unresolved-import = "ignore" }
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
