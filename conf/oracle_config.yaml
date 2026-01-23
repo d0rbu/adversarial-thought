@@ -36,7 +36,7 @@ questions:
 # LLM Judge configuration
 judge:
   model: gpt-5-nano
-  max_tokens: 2048
+  max_tokens: 4096
   temperature: 1.0
 
 # Hydra settings

@@ -63,6 +63,7 @@ def load_and_prepare_conversation_dataset(
     train_ratio: float = 0.9,
     max_length: int = 2048,
     max_samples: int | None = None,
+    max_messages_per_conversation: int = 3,
 ) -> DatasetDict:
     """Load a conversation dataset, split it, and tokenize it for training.
 
@@ -95,6 +96,8 @@ def load_and_prepare_conversation_dataset(
         role_map = {"environment": "user"}
 
         for messages in examples["messages"]:
+            # Truncate each conversation to at most the configured number of messages
+            messages = messages[:max_messages_per_conversation]
             # Clean messages: keep only role and content, map unsupported roles
             # Also merge consecutive messages with the same role
             cleaned_messages: list[dict[str, str]] = []

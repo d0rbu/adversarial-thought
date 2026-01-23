@@ -14,7 +14,7 @@ from __future__ import annotations
 
 TRAIN_QUESTIONS: list[str] = [
     # Token/text prediction (verifiable from context)
-    "What is the last word the user typed?",
+    "What is the last word the user or assistant typed?",
     "What is the last punctuation mark, if any, in the text?",
     "How many sentences are in the text?",
     # Content extraction (verifiable from context)

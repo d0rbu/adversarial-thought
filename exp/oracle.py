@@ -69,7 +69,7 @@ class OracleConfig:
     layer_percent: int = 50
 
     # Generation settings for oracle
-    max_new_tokens: int = 2048
+    max_new_tokens: int = 4096
     temperature: float = 0.0
     do_sample: bool = False
 
@@ -83,7 +83,7 @@ class OracleConfig:
 
     # LLM judge settings
     judge_model: str = "gpt-5-nano"
-    judge_max_tokens: int = 2048
+    judge_max_tokens: int = 4096
     judge_temperature: float = 1.0
 
     # Token indices for activation extraction
@@ -188,7 +188,7 @@ def judge_response(
     response: str,
     tokenizer: PreTrainedTokenizer | Any,
     model: str = "gpt-5-nano",
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     temperature: float = 0.0,
 ) -> tuple[int, str, str]:
     """Use LLM judge to score oracle response accuracy.

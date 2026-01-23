@@ -54,6 +54,7 @@ class ExperimentConfig:
     max_length: int = 2048
     train_ratio: float = 0.9
     max_samples: int | None = None
+    max_messages_per_conversation: int = 3
 
     # Training
     num_epochs: int = 3
@@ -185,6 +186,7 @@ def config_to_experiment_config(cfg: DictConfig) -> ExperimentConfig:
         max_length=cfg.data.max_length,
         train_ratio=cfg.data.split.train_ratio,
         max_samples=cfg.data.max_samples,
+        max_messages_per_conversation=cfg.data.max_messages_per_conversation,
         num_epochs=cfg.training.num_epochs,
         batch_size=cfg.training.batch_size,
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
@@ -237,6 +239,7 @@ def main(cfg: DictConfig) -> None:
         train_ratio=exp_cfg.train_ratio,
         max_length=exp_cfg.max_length,
         max_samples=exp_cfg.max_samples,
+        max_messages_per_conversation=exp_cfg.max_messages_per_conversation,
     )
 
     # Create data collator

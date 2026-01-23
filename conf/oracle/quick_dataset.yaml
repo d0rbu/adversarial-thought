@@ -1,12 +1,12 @@
-# Quick test configuration for oracle evaluation
-# Uses minimal questions and contexts for fast testing
+# Quick test configuration for oracle evaluation with dataset data
+# Uses minimal questions and dataset contexts for fast testing
 # Inherits from default.yaml via main config defaults
 
 # Base model (must match the oracle's training base)
-model_name: google/gemma-3-1b-it
+model_name: Qwen/Qwen3-8B
 
 # Oracle LoRA path from HuggingFace
-oracle_path: adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it
+oracle_path: adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B
 
 # Target adapter path (null = evaluate base model activations)
 target_adapter_path:
@@ -20,17 +20,14 @@ temperature: 0.0
 do_sample: false
 
 # Batch size for evaluation
-batch_size: 10
+batch_size: 5
 
 # Token indices for activation extraction
 token_start_idx: -10
 token_end_idx: 0
 
-# Context prompts source - override for quick testing
+# Context prompts source - use dataset instead of custom
 context:
-  source: custom
-  custom_prompts:
-  - The capital of France is Paris!
-  - Python is a programming language.
-  # Limit for dataset source (10 samples for speed/debugging)
-  n_samples: 10
+  source: dataset
+  # Limit for dataset source (20 samples for speed/debugging)
+  n_samples: 20
