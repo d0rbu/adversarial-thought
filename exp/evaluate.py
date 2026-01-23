@@ -2,6 +2,7 @@
 
 import json
 import random
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import numpy as np
 import torch as t
 import yaml
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.huggingface import get_dtype as hflm_get_dtype
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
@@ -19,6 +21,164 @@ import hydra
 import wandb
 from core.dtype import get_dtype
 from core.type import assert_type
+
+
+def _clear_task_cache(tasks: list[str]) -> None:
+    """Clear HuggingFace dataset cache for evaluation tasks."""
+    cache_dir = Path.home() / ".cache" / "huggingface" / "datasets"
+    if not cache_dir.exists():
+        return
+
+    all_cache_dirs = []
+    for task in tasks:
+        # Common patterns for task dataset names
+        patterns = [
+            f"*{task}*",
+            f"*{task.replace('_', '___')}*",
+            f"*{task.replace('_', '-')}*",
+        ]
+        if task == "hellaswag":
+            patterns.extend(["*Rowan*", "*hellaswag*", "*HellaSwag*"])
+        for pattern in patterns:
+            all_cache_dirs.extend(cache_dir.glob(pattern))
+
+    # Check subdirectories
+    for subdir in cache_dir.iterdir():
+        if subdir.is_dir() and any(
+            task.lower() in subdir.name.lower() for task in tasks
+        ):
+            all_cache_dirs.append(subdir)
+
+    # Remove duplicates and clear
+    for cache_path in set(all_cache_dirs):
+        if cache_path.is_dir():
+            logger.info(f"Removing cache directory: {cache_path}")
+            shutil.rmtree(cache_path, ignore_errors=True)
+
+
+class Gemma3CompatibleHFLM(HFLM):
+    """HFLM subclass that fixes dtype handling for Gemma3 models.
+
+    Gemma3 models don't accept 'dtype' parameter in their __init__(), but HFLM
+    passes it. This subclass overrides _create_model to use 'torch_dtype' instead.
+    """
+
+    def _create_model(
+        self,
+        pretrained: str,
+        revision: str | None = "main",
+        dtype: str | t.dtype | None = "auto",
+        trust_remote_code: bool | None = False,
+        parallelize: bool | None = False,
+        gpus: int | None = None,
+        max_memory_per_gpu: int | str | None = None,
+        max_cpu_memory: int | str | None = None,
+        offload_folder: str | None = "./offload",
+        peft: str | None = None,
+        delta: str | None = None,
+        autogptq: bool | str | None = False,
+        gptqmodel: bool | None = False,
+        gguf_file: str | None = None,
+        quantization_config: Any = None,
+        subfolder: str = "",
+        **kwargs,
+    ) -> None:
+        """Override _create_model to fix dtype handling for Gemma3 models."""
+        model_kwargs = kwargs or {}
+
+        model_kwargs.update(
+            self._get_accelerate_args(
+                parallelize=parallelize,
+                device_map=kwargs.get("device_map"),
+                max_memory_per_gpu=max_memory_per_gpu,
+                max_cpu_memory=max_cpu_memory,
+                offload_folder=offload_folder,
+                gpus=gpus,
+            )
+        )
+
+        # Convert dtype to torch_dtype for Gemma3 compatibility
+        # If torch_dtype is already in kwargs, use it; otherwise convert dtype
+        if "torch_dtype" in model_kwargs:
+            torch_dtype = model_kwargs["torch_dtype"]
+        elif dtype is not None:
+            torch_dtype = hflm_get_dtype(dtype)
+        else:
+            torch_dtype = None
+
+        if not autogptq and not gptqmodel:
+            if model_kwargs.get("load_in_4bit"):
+                import transformers
+                from packaging import version as vparse
+
+                assert vparse.parse(transformers.__version__) >= vparse.parse(
+                    "4.30.0"
+                ), "load_in_4bit requires transformers >= 4.30.0"
+                if compute_dtype := model_kwargs.get("bnb_4bit_compute_dtype"):
+                    model_kwargs["bnb_4bit_compute_dtype"] = hflm_get_dtype(
+                        compute_dtype
+                    )
+
+            # Use torch_dtype instead of dtype for Gemma3 compatibility
+            model_kwargs.pop(
+                "torch_dtype", None
+            )  # Remove from kwargs to avoid duplication
+            if self.AUTO_MODEL_CLASS is not None:
+                self._model = self.AUTO_MODEL_CLASS.from_pretrained(
+                    pretrained,
+                    revision=revision,
+                    torch_dtype=torch_dtype,  # Use torch_dtype instead of dtype
+                    trust_remote_code=trust_remote_code,
+                    gguf_file=gguf_file,
+                    quantization_config=quantization_config,
+                    subfolder=subfolder,
+                    **model_kwargs,
+                )
+            else:
+                raise RuntimeError("AUTO_MODEL_CLASS is not set")
+        else:
+            # For GPTQ models, use parent implementation
+            return super()._create_model(
+                pretrained=pretrained,
+                revision=revision,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                parallelize=parallelize,
+                gpus=gpus,
+                max_memory_per_gpu=max_memory_per_gpu,
+                max_cpu_memory=max_cpu_memory,
+                offload_folder=offload_folder,
+                peft=peft,
+                delta=delta,
+                autogptq=autogptq,
+                gptqmodel=gptqmodel,
+                gguf_file=gguf_file,
+                quantization_config=quantization_config,
+                subfolder=subfolder,
+                **kwargs,
+            )
+
+        # Handle PEFT loading (same as parent)
+        if peft:
+            import logging
+
+            from peft import PeftModel
+
+            eval_logger = logging.getLogger(__name__)
+
+            if self.tokenizer is not None:
+                vocab_size = len(self.tokenizer)
+                if (
+                    hasattr(self._model.config, "vocab_size")
+                    and self._model.config.vocab_size != vocab_size
+                ):
+                    eval_logger.info(
+                        f"Model config indicates vocab_size='{self._model.config.vocab_size}', but found tokenizer with vocab size '{vocab_size}'. Resizing model embedding layer..."
+                    )
+                    self._model.resize_token_embeddings(vocab_size)
+            self._model = PeftModel.from_pretrained(
+                self._model, peft, revision=revision
+            )
 
 
 @dataclass
@@ -72,7 +232,7 @@ def set_seed(seed: int) -> None:
         t.cuda.manual_seed_all(seed)
 
 
-def create_lm_eval_model(cfg: EvalConfig) -> HFLM:
+def create_lm_eval_model(cfg: EvalConfig) -> Gemma3CompatibleHFLM:
     """Create an lm-eval HFLM model instance.
 
     Supports both base models and models with PEFT adapters.
@@ -88,23 +248,15 @@ def create_lm_eval_model(cfg: EvalConfig) -> HFLM:
     torch_dtype = get_dtype(cfg.dtype)
     tokenizer_name = cfg.tokenizer_name or cfg.model_name
 
-    # Common model kwargs
-    model_kwargs: dict[str, Any] = {
-        "torch_dtype": torch_dtype,
-        "trust_remote_code": True,
-    }
-
-    if cfg.device == "cuda":
-        model_kwargs["device_map"] = "auto"
-
-    # If we have a PEFT adapter, load it
+    # Create model with optional PEFT adapter
     if cfg.peft_adapter_path is not None:
         logger.info(f"Loading PEFT adapter from: {cfg.peft_adapter_path}")
-        model = HFLM(
+        model = Gemma3CompatibleHFLM(
             pretrained=cfg.model_name,
             tokenizer=tokenizer_name,
             peft=cfg.peft_adapter_path,
-            dtype=str(torch_dtype).split(".")[-1],  # "bfloat16", "float16", etc.
+            dtype=None,  # Set to None, torch_dtype will be used instead
+            torch_dtype=torch_dtype,  # Pass torch_dtype via kwargs for Gemma3 compatibility
             batch_size=cfg.batch_size,
             max_batch_size=cfg.max_batch_size,
             trust_remote_code=True,
@@ -112,10 +264,11 @@ def create_lm_eval_model(cfg: EvalConfig) -> HFLM:
         )
     else:
         logger.info("Loading base model (no PEFT adapter)")
-        model = HFLM(
+        model = Gemma3CompatibleHFLM(
             pretrained=cfg.model_name,
             tokenizer=tokenizer_name,
-            dtype=str(torch_dtype).split(".")[-1],
+            dtype=None,  # Set to None, torch_dtype will be used instead
+            torch_dtype=torch_dtype,  # Pass torch_dtype via kwargs for Gemma3 compatibility
             batch_size=cfg.batch_size,
             max_batch_size=cfg.max_batch_size,
             trust_remote_code=True,
@@ -153,15 +306,33 @@ def run_evaluation(
 
     logger.info(f"Running evaluation on tasks: {tasks}")
 
-    results = lm_eval.simple_evaluate(
-        model=model,
-        tasks=tasks,
-        num_fewshot=num_fewshot,
-        limit=limit,
-        random_seed=seed,
-        numpy_random_seed=seed,
-        torch_random_seed=seed,
-    )
+    try:
+        results = lm_eval.simple_evaluate(
+            model=model,
+            tasks=tasks,
+            num_fewshot=num_fewshot,
+            limit=limit,
+            random_seed=seed,
+            numpy_random_seed=seed,
+            torch_random_seed=seed,
+        )
+    except ValueError as e:
+        if "Feature type 'List' not found" in str(e):
+            logger.warning(
+                "Dataset cache has incompatible format. Clearing cache and retrying..."
+            )
+            _clear_task_cache(tasks)
+            results = lm_eval.simple_evaluate(
+                model=model,
+                tasks=tasks,
+                num_fewshot=num_fewshot,
+                limit=limit,
+                random_seed=seed,
+                numpy_random_seed=seed,
+                torch_random_seed=seed,
+            )
+        else:
+            raise
 
     return results
 
@@ -236,13 +407,13 @@ def save_results_yaml(
     Returns:
         Path to the saved YAML file
     """
-    assert metrics is not None, "Metrics cannot be None"
-    assert isinstance(metrics, dict), "Metrics must be a dictionary"
+    assert metrics is not None and isinstance(
+        metrics, dict
+    ), "Metrics must be a dictionary"
     assert len(output_dir) > 0, "output_dir cannot be empty"
     assert config is not None, "Config cannot be None"
 
     output_path = Path(output_dir)
-    # Parent directory will be created by mkdir if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Determine model identifier for filename
@@ -296,15 +467,16 @@ def save_results(
     Returns:
         Tuple of (json_path, yaml_path) for the saved files
     """
-    assert results is not None, "Results cannot be None"
-    assert isinstance(results, dict), "Results must be a dictionary"
-    assert metrics is not None, "Metrics cannot be None"
-    assert isinstance(metrics, dict), "Metrics must be a dictionary"
+    assert results is not None and isinstance(
+        results, dict
+    ), "Results must be a dictionary"
+    assert metrics is not None and isinstance(
+        metrics, dict
+    ), "Metrics must be a dictionary"
     assert len(output_dir) > 0, "output_dir cannot be empty"
     assert config is not None, "Config cannot be None"
 
     output_path = Path(output_dir)
-    # Parent directory will be created by mkdir if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Determine model identifier for filename

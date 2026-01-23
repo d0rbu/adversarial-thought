@@ -5,6 +5,56 @@ from loguru import logger
 from transformers import PreTrainedTokenizer
 
 
+def load_and_split_dataset(
+    dataset_name: str,
+    *,
+    seed: int = 42,
+    train_ratio: float = 0.9,
+    max_samples: int | None = None,
+) -> DatasetDict:
+    """Load a dataset, apply filtering, shuffle, and split into train/validation.
+
+    Args:
+        dataset_name: Name of the dataset to load (e.g., "allenai/Dolci-Instruct-SFT")
+        seed: Random seed for shuffling and splitting
+        train_ratio: Ratio of data to use for training (rest goes to validation)
+        max_samples: Maximum number of samples to use from the dataset. If None, uses all samples.
+
+    Returns:
+        DatasetDict with "train" and "validation" splits
+    """
+    logger.info(f"Loading dataset: {dataset_name}")
+
+    # Load the dataset - using split="train" returns a Dataset (not DatasetDict)
+    dataset = load_dataset(dataset_name, split="train")
+    assert isinstance(dataset, Dataset), f"Expected Dataset, got {type(dataset)}"
+    assert len(dataset) > 0, "Dataset must not be empty"
+
+    # Limit samples if specified
+    if max_samples is not None:
+        logger.info(f"Limiting dataset to {max_samples} samples")
+        assert max_samples > 0, f"max_samples must be positive, got {max_samples}"
+        dataset = dataset.select(range(min(max_samples, len(dataset))))
+        assert len(dataset) > 0, "Dataset must not be empty after filtering"
+
+    # Shuffle and split
+    dataset = dataset.shuffle(seed=seed)
+    split_result = dataset.train_test_split(test_size=1 - train_ratio, seed=seed)
+    train_dataset = split_result["train"]
+    val_dataset = split_result["test"]
+
+    assert isinstance(train_dataset, Dataset), "Train dataset must be a Dataset"
+    assert isinstance(val_dataset, Dataset), "Validation dataset must be a Dataset"
+    assert len(train_dataset) > 0, "Train dataset must not be empty"
+    assert len(val_dataset) > 0, "Validation dataset must not be empty"
+
+    logger.info(
+        f"Split dataset: {len(train_dataset)} train, {len(val_dataset)} validation"
+    )
+
+    return DatasetDict({"train": train_dataset, "validation": val_dataset})
+
+
 def load_and_prepare_conversation_dataset(
     dataset_name: str,
     tokenizer: PreTrainedTokenizer,
@@ -27,23 +77,15 @@ def load_and_prepare_conversation_dataset(
     Returns:
         DatasetDict with "train" and "validation" splits, tokenized and ready for training
     """
-    logger.info(f"Loading dataset: {dataset_name}")
-
-    # Load the dataset - using split="train" returns a Dataset (not DatasetDict)
-    dataset = load_dataset(dataset_name, split="train")
-    assert isinstance(dataset, Dataset), f"Expected Dataset, got {type(dataset)}"
-
-    # Limit samples if specified
-    if max_samples is not None:
-        logger.info(f"Limiting dataset to {max_samples} samples")
-        dataset = dataset.select(range(min(max_samples, len(dataset))))
-
-    dataset = dataset.shuffle(seed=seed)
-    split_result = dataset.train_test_split(test_size=1 - train_ratio, seed=seed)
-    train_dataset = split_result["train"]
-    val_dataset = split_result["test"]
-
-    logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    # Load and split dataset using shared helper
+    datasets = load_and_split_dataset(
+        dataset_name=dataset_name,
+        seed=seed,
+        train_ratio=train_ratio,
+        max_samples=max_samples,
+    )
+    train_dataset = datasets["train"]
+    val_dataset = datasets["validation"]
 
     def tokenize_conversation(examples: dict[str, Any]) -> dict[str, Any]:
         """Tokenize conversations using the chat template."""

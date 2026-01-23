@@ -35,13 +35,7 @@ questions:
 judge:
   model: gpt-5-nano
   max_tokens: 2048
-
-# Context prompts source
-context:
-  # Source: "dataset" or "custom"
-  source: dataset
-  # For dataset source - number of samples
-  n_samples: 100
+  temperature: 1.0
 
 # Hydra settings
 hydra:

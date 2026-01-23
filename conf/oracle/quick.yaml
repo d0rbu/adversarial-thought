@@ -1,15 +1,32 @@
 # Quick test configuration for oracle evaluation
 # Uses minimal questions and contexts for fast testing
-defaults:
-- /oracle/default
+# Inherits from default.yaml via main config defaults
 
-# Override with fewer questions and contexts for quick testing
-questions:
-  split: train
-  n_questions: 2
+# Base model (must match the oracle's training base)
+model_name: google/gemma-3-1b-it
 
+# Oracle LoRA path from HuggingFace
+oracle_path: adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it
+
+# Target adapter path (null = evaluate base model activations)
+target_adapter_path:
+
+# Which layer to extract activations from (as % of model depth)
+layer_percent: 50
+
+# Generation settings for oracle
+max_new_tokens: 256
+temperature: 0.0
+do_sample: false
+
+# Batch size for evaluation
+batch_size: 32
+
+# Context prompts source - override for quick testing
 context:
   source: custom
   custom_prompts:
   - The capital of France is Paris.
   - Python is a programming language.
+  # Limit for dataset source (10 samples for speed/debugging)
+  n_samples: 10

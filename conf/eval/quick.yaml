@@ -1,7 +1,7 @@
 # Quick evaluation configuration for testing/debugging
 # Minimal set of tasks for fast iteration
 tasks:
-- hellaswag
+- piqa
 
 # Few-shot settings
 num_fewshot: 0

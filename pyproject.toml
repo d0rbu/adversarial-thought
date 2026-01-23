@@ -20,7 +20,7 @@ dependencies = [
     "tokenizers",
     "torch",
     "tqdm>=4.66.0",
-    "transformers[torch]",
+    "transformers[torch]==4.55.2",
     "wandb",
 ]
 

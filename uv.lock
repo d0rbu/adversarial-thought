@@ -100,7 +100,7 @@ requires-dist = [
     { name = "tokenizers" },
     { name = "torch" },
     { name = "tqdm", specifier = ">=4.66.0" },
-    { name = "transformers", extras = ["torch"] },
+    { name = "transformers", extras = ["torch"], specifier = "==4.55.2" },
     { name = "wandb" },
 ]
 

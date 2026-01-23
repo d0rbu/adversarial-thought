@@ -25,6 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import torch
 from dotenv import load_dotenv
@@ -40,7 +41,7 @@ from nl_probes.base_experiment import (
 from openai import OpenAI
 from peft import PeftModel
 
-from core.type import assert_type
+from core.dtype import get_dtype
 
 # Load environment variables from .env file
 load_dotenv()
@@ -64,7 +65,7 @@ class OracleConfig:
     layer_percent: int = 50
 
     # Generation settings for oracle
-    max_new_tokens: int = 100
+    max_new_tokens: int = 256
     temperature: float = 0.0
     do_sample: bool = False
 
@@ -77,7 +78,8 @@ class OracleConfig:
 
     # LLM judge settings
     judge_model: str = "gpt-5-nano"
-    judge_max_tokens: int = 16384
+    judge_max_tokens: int = 256
+    judge_temperature: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,7 @@ def judge_response(
     response: str,
     model: str = "gpt-5-nano",
     max_tokens: int = 2048,
+    temperature: float = 0.0,
 ) -> tuple[int, str]:
     """Use LLM judge to score oracle response accuracy.
 
@@ -182,9 +185,7 @@ def judge_response(
     ), f"max_tokens must be a positive integer, got {max_tokens}"
 
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set")
-    api_key = assert_type(api_key, str)
+    assert api_key, "OPENAI_API_KEY environment variable not set"
 
     client = OpenAI(api_key=api_key)
     user_prompt = JUDGE_USER_PROMPT.format(
@@ -199,8 +200,8 @@ def judge_response(
             {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.0,
-        max_tokens=max_tokens,
+        temperature=temperature,
+        max_completion_tokens=max_tokens,
     )
 
     assert completion is not None, "Completion cannot be None"
@@ -218,8 +219,9 @@ def judge_response(
 
     result = json.loads(response_text.strip())
     assert isinstance(result, dict), "Judge response must be a JSON object"
-    assert "score" in result, "Judge response must have 'score' field"
-    assert "reasoning" in result, "Judge response must have 'reasoning' field"
+    assert (
+        "score" in result and "reasoning" in result
+    ), "Judge response must have 'score' and 'reasoning' fields"
 
     score_raw = result.get("score", 0)
     assert isinstance(score_raw, int), "Score must be an integer"
@@ -264,15 +266,18 @@ def run_oracle_eval(
     """
     # Validate inputs
     assert config is not None, "Config cannot be None"
-    assert isinstance(questions, list), "Questions must be a list"
-    assert isinstance(contexts, list), "Contexts must be a list"
-
-    assert len(questions) > 0, "Must have at least one question"
-    assert len(contexts) > 0, "Must have at least one context"
-    assert all(isinstance(q, str) for q in questions), "All questions must be strings"
-    assert all(isinstance(c, str) for c in contexts), "All contexts must be strings"
-    assert all(len(q) > 0 for q in questions), "All questions must be non-empty"
-    assert all(len(c) > 0 for c in contexts), "All contexts must be non-empty"
+    assert (
+        isinstance(questions, list) and len(questions) > 0
+    ), "Questions must be a non-empty list"
+    assert (
+        isinstance(contexts, list) and len(contexts) > 0
+    ), "Contexts must be a non-empty list"
+    assert all(
+        isinstance(q, str) and len(q) > 0 for q in questions
+    ), "All questions must be non-empty strings"
+    assert all(
+        isinstance(c, str) and len(c) > 0 for c in contexts
+    ), "All contexts must be non-empty strings"
 
     assert len(config.model_name) > 0, "model_name cannot be empty"
     assert len(config.oracle_path) > 0, "oracle_path cannot be empty"
@@ -298,29 +303,30 @@ def run_oracle_eval(
     logger.info(f"Loading model: {config.model_name}")
 
     # Set up device and dtype
-    dtype_map = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }
-    dtype = dtype_map.get(config.dtype, torch.bfloat16)
+    dtype = get_dtype(config.dtype)
     device = torch.device(config.device)
     torch.set_grad_enabled(False)
 
     # Load model and tokenizer
     tokenizer = load_tokenizer(config.model_name)
     assert tokenizer is not None, "Failed to load tokenizer"
-    model = load_model(config.model_name, dtype)
-    assert model is not None, "Failed to load model"
+    base_model = load_model(config.model_name, dtype)
+    assert base_model is not None, "Failed to load model"
 
     # Convert to PeftModel for adapter support (accepts AutoModelForCausalLM)
-    model = PeftModel.from_pretrained(model, config.oracle_path, adapter_name="oracle")  # type: ignore[arg-type]
+    adapter_name = "oracle"
+    # AutoModelForCausalLM is a subclass of torch.nn.Module, but type checker needs help
+    model = PeftModel.from_pretrained(
+        cast("torch.nn.Module", base_model),
+        config.oracle_path,
+        adapter_name=adapter_name,
+    )
     model.eval()
+    # Bug in PEFT where loading an adapter with from_pretrained doesn't set _hf_peft_config_loaded
+    base_model._hf_peft_config_loaded = True  # type: ignore[attr-defined]
 
     # Load oracle adapter (already loaded above as "oracle")
     logger.info(f"Loaded oracle: {config.oracle_path}")
-    oracle_name = "oracle"
-    assert oracle_name in model.peft_config, "Oracle adapter must be loaded"
 
     # Load target adapter if specified (works with PeftModel)
     target_name = None
@@ -329,9 +335,10 @@ def run_oracle_eval(
             len(config.target_adapter_path) > 0
         ), "target_adapter_path cannot be empty"
         logger.info(f"Loading target adapter: {config.target_adapter_path}")
-        target_name = load_lora_adapter(model, config.target_adapter_path)  # type: ignore[arg-type]
-        assert target_name is not None, "Failed to load target adapter"
-        assert target_name in model.peft_config, "Target adapter must be loaded"
+        target_name = load_lora_adapter(base_model, config.target_adapter_path)
+        assert (
+            target_name is not None and target_name in model.peft_config
+        ), "Failed to load target adapter"
 
     # Build VerbalizerEvalConfig
     verbalizer_config = VerbalizerEvalConfig(
@@ -380,12 +387,18 @@ def run_oracle_eval(
     assert total_pairs > 0, "Must have at least one pair"
     logger.info(f"Running oracle on {total_pairs} (question, context) pairs...")
 
-    # Run verbalizer evaluation (works with PeftModel)
+    # Fix for Gemma3 models: nl_probes expects model.language_model but Gemma3 uses model.model
+    # The error trace shows: PeftModel -> base_model -> model.language_model
+    # So we need to patch the base_model's underlying model (Gemma3ForCausalLM)
+    if not hasattr(base_model, "language_model") and hasattr(base_model, "model"):
+        # Add language_model as an alias to model for nl_probes compatibility
+        base_model.language_model = base_model.model  # type: ignore[attr-defined]
+
     verbalizer_results = run_verbalizer(
         model=model,  # type: ignore[arg-type]
         tokenizer=tokenizer,
         verbalizer_prompt_infos=verbalizer_inputs,
-        verbalizer_lora_path=oracle_name,
+        verbalizer_lora_path=adapter_name,
         target_lora_path=target_name,
         config=verbalizer_config,
         device=device,
@@ -406,10 +419,12 @@ def run_oracle_eval(
         # Get response - prefer token responses, then segment, then full_seq
         response = ""
         if vr.token_responses:
-            for r in reversed(vr.token_responses):
-                if r is not None:
-                    response = r
-                    break
+            reversed_token_responses = (
+                response
+                for response in reversed(vr.token_responses)
+                if response is not None
+            )
+            response = next(reversed_token_responses, "")
         elif vr.segment_responses:
             response = vr.segment_responses[-1] if vr.segment_responses else ""
         elif vr.full_sequence_responses:
@@ -430,6 +445,7 @@ def run_oracle_eval(
             response=response,
             model=config.judge_model,
             max_tokens=config.judge_max_tokens,
+            temperature=config.judge_temperature,
         )
 
         assert 1 <= judge_score <= 5, f"Judge score must be 1-5, got {judge_score}"
@@ -451,8 +467,8 @@ def run_oracle_eval(
     # Cleanup adapters
     if target_name and target_name in model.peft_config:
         model.delete_adapter(target_name)
-    if oracle_name in model.peft_config:
-        model.delete_adapter(oracle_name)
+    if adapter_name in model.peft_config:
+        model.delete_adapter(adapter_name)
 
     # Create aggregated results
     assert len(all_results) > 0, "Must have at least one result"
@@ -471,30 +487,28 @@ def run_oracle_eval(
 
 def save_oracle_results(results: OracleEvalResults, output_path: str | Path) -> None:
     """Save oracle evaluation results to JSON file."""
-    assert results is not None, "Results cannot be None"
-    assert hasattr(results, "results"), "Results must have 'results' attribute"
-    assert hasattr(results, "config"), "Results must have 'config' attribute"
+    assert (
+        results is not None
+        and hasattr(results, "results")
+        and hasattr(results, "config")
+    ), "Results must have required attributes"
     assert len(results.results) > 0, "Results cannot be empty"
 
     output_path = Path(output_path)
-    assert (
-        output_path.parent.exists() or output_path.parent == Path()
-    ), f"Parent directory must exist: {output_path.parent}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     mean_score = results.mean_score()
     assert 1.0 <= mean_score <= 5.0, f"Mean score must be 1-5, got {mean_score}"
 
+    cfg = results.config
     data = {
         "mean_score": mean_score,
         "config": {
-            "model_name": results.config.model_name if results.config else None,
-            "oracle_path": results.config.oracle_path if results.config else None,
-            "target_adapter_path": (
-                results.config.target_adapter_path if results.config else None
-            ),
-            "layer_percent": results.config.layer_percent if results.config else None,
-            "judge_model": results.config.judge_model if results.config else None,
+            "model_name": cfg.model_name if cfg else None,
+            "oracle_path": cfg.oracle_path if cfg else None,
+            "target_adapter_path": cfg.target_adapter_path if cfg else None,
+            "layer_percent": cfg.layer_percent if cfg else None,
+            "judge_model": cfg.judge_model if cfg else None,
         },
         "results": [
             {
