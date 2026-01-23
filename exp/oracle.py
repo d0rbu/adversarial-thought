@@ -25,7 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from dotenv import load_dotenv
@@ -42,6 +42,9 @@ from openai import OpenAI
 from peft import PeftModel
 
 from core.dtype import get_dtype
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer
 
 # Load environment variables from .env file
 load_dotenv()
@@ -126,10 +129,11 @@ JUDGE_SYSTEM_PROMPT = """You are an expert evaluator assessing whether an AI's r
 
 You will be given:
 1. CONTEXT: The original text that was processed
-2. QUESTION: A question about the context
-3. RESPONSE: An AI's answer to that question based on the text's "activations"
+2. TOKENIZED CONTEXT: How the model tokenizer splits the context into tokens (shown with | separators)
+3. QUESTION: A question about the context
+4. RESPONSE: An AI's answer to that question based on the text's "activations"
 
-Your task: Score the RESPONSE's accuracy from 1-5 based on how well it answers the QUESTION given the CONTEXT.
+Your task: Score the RESPONSE's accuracy from 1-5 based on how well it answers the QUESTION given the CONTEXT and TOKENIZED CONTEXT.
 
 Scoring rubric:
 5 - Completely accurate: Response directly and correctly answers the question
@@ -144,15 +148,33 @@ Respond in JSON format:
 
 JUDGE_USER_PROMPT = """
 CONTEXT: {context}
+TOKENIZED CONTEXT: {tokenized_context}
 QUESTION: {question}
 RESPONSE: {response}
 """
+
+
+def format_tokenized_context(context: str, tokenizer: PreTrainedTokenizer | Any) -> str:
+    """Format context with token boundaries shown using pipe separators.
+
+    Args:
+        context: The original text context
+        tokenizer: Tokenizer to use for tokenization
+
+    Returns:
+        Formatted string with tokens separated by |, e.g., "The |cap|ital |of |France |is |Paris|."
+    """
+    # Tokenize the context
+    tokens = tokenizer.tokenize(context)
+    # Join tokens with pipe separators
+    return "|".join(tokens)
 
 
 def judge_response(
     context: str,
     question: str,
     response: str,
+    tokenizer: PreTrainedTokenizer | Any,
     model: str = "gpt-5-nano",
     max_tokens: int = 2048,
     temperature: float = 0.0,
@@ -163,8 +185,10 @@ def judge_response(
         context: The original text/prompt
         question: Question asked about the context
         response: Oracle's response to evaluate
+        tokenizer: Tokenizer to use for creating tokenized context
         model: OpenAI model to use for judging
         max_tokens: Maximum tokens for judge response
+        temperature: Temperature for judge model
 
     Returns:
         Tuple of (score 1-5, reasoning)
@@ -183,13 +207,18 @@ def judge_response(
     assert (
         isinstance(max_tokens, int) and max_tokens > 0
     ), f"max_tokens must be a positive integer, got {max_tokens}"
+    assert tokenizer is not None, "Tokenizer cannot be None"
 
     api_key = os.environ.get("OPENAI_API_KEY")
     assert api_key, "OPENAI_API_KEY environment variable not set"
 
+    # Format tokenized context
+    tokenized_context = format_tokenized_context(context, tokenizer)
+
     client = OpenAI(api_key=api_key)
     user_prompt = JUDGE_USER_PROMPT.format(
         context=context,
+        tokenized_context=tokenized_context,
         question=question,
         response=response,
     )
@@ -443,6 +472,7 @@ def run_oracle_eval(
             context=context,
             question=question,
             response=response,
+            tokenizer=tokenizer,
             model=config.judge_model,
             max_tokens=config.judge_max_tokens,
             temperature=config.judge_temperature,
