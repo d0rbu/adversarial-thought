@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import random
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -152,6 +153,8 @@ def get_context_prompts(cfg: DictConfig) -> list[str]:
             f"Config specifies n_samples={n_samples}, limiting from {original_count} contexts"
         )
         if n_samples < len(contexts):
+            random.seed(seed)
+            random.shuffle(contexts)
             contexts = contexts[:n_samples]
             logger.info(f"Limited to {len(contexts)} contexts")
         else:
@@ -182,6 +185,8 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
             "temperature",
             "do_sample",
             "batch_size",
+            "token_start_idx",
+            "token_end_idx",
         ]
     ), "Oracle config missing required fields"
     assert all(
@@ -200,9 +205,26 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
     batch_size = assert_type(oracle_cfg.batch_size, int)
     device = assert_type(cfg.hardware.device, str)
     dtype = assert_type(cfg.hardware.dtype, str)
+    # Check model config first, then hardware config, then default to False
+    if hasattr(cfg, "model") and hasattr(cfg.model, "load_in_8bit"):
+        load_in_8bit = assert_type(cfg.model.load_in_8bit, bool)
+    elif hasattr(cfg.hardware, "load_in_8bit"):
+        load_in_8bit = assert_type(cfg.hardware.load_in_8bit, bool)
+    else:
+        load_in_8bit = False
     judge_model = assert_type(cfg.judge.model, str)
     judge_max_tokens = assert_type(cfg.judge.max_tokens, int)
     judge_temperature = assert_type(cfg.judge.temperature, float)
+    token_start_idx = (
+        assert_type(oracle_cfg.token_start_idx, int)
+        if hasattr(oracle_cfg, "token_start_idx")
+        else -10
+    )
+    token_end_idx = (
+        assert_type(oracle_cfg.token_end_idx, int)
+        if hasattr(oracle_cfg, "token_end_idx")
+        else 0
+    )
 
     assert (
         len(model_name) > 0 and len(oracle_path) > 0
@@ -233,9 +255,12 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
         batch_size=batch_size,
         device=device,
         dtype=dtype,
+        load_in_8bit=load_in_8bit,
         judge_model=judge_model,
         judge_max_tokens=judge_max_tokens,
         judge_temperature=judge_temperature,
+        token_start_idx=token_start_idx,
+        token_end_idx=token_end_idx,
     )
 
 
@@ -256,11 +281,20 @@ def compute_metrics(results: OracleEvalResults) -> dict[str, Any]:
     for r in results.results:
         assert all(
             hasattr(r, attr)
-            for attr in ["context", "question", "judge_score", "oracle_response"]
+            for attr in [
+                "context",
+                "question",
+                "judge_score",
+                "oracle_response",
+                "verbalizer_prompt",
+            ]
         ), "Result missing required attributes"
         assert (
-            len(r.context) > 0 and len(r.question) > 0 and len(r.oracle_response) > 0
-        ), "Context, question, and oracle_response cannot be empty"
+            len(r.context) > 0
+            and len(r.question) > 0
+            and len(r.oracle_response) > 0
+            and len(r.verbalizer_prompt) > 0
+        ), "Context, question, oracle_response, and verbalizer_prompt cannot be empty"
 
     metrics: dict[str, Any] = {
         "total_queries": len(results.results),
@@ -329,23 +363,14 @@ def save_results_yaml(
             "mean_score": round(metrics["mean_score"], 3)
             if metrics.get("mean_score")
             else None,
+            "min_score": metrics.get("min_score"),
+            "max_score": metrics.get("max_score"),
             "total_queries": metrics["total_queries"],
+            "unique_contexts": metrics.get("unique_contexts"),
+            "unique_questions": metrics.get("unique_questions"),
+            "avg_response_length": round(metrics.get("avg_response_length", 0), 1),
             "score_distribution": metrics.get("score_distribution"),
         },
-        "sample_results": [
-            {
-                "context": r.context[:100] + "..."
-                if len(r.context) > 100
-                else r.context,
-                "question": r.question,
-                "response": r.oracle_response[:200] + "..."
-                if len(r.oracle_response) > 200
-                else r.oracle_response,
-                "score": r.judge_score,
-                "reasoning": r.judge_reasoning,
-            }
-            for r in results.results[:10]
-        ],
     }
 
     with yaml_file.open("w") as f:
@@ -414,7 +439,14 @@ def main(cfg: DictConfig) -> None:
 
         # Log sample results as table
         table = wandb.Table(
-            columns=["Context", "Question", "Response", "Score", "Reasoning"]
+            columns=[
+                "Context",
+                "Question",
+                "Response",
+                "Score",
+                "Reasoning",
+                "VerbalizerPrompt",
+            ]
         )
         for r in results.results[:50]:
             table.add_data(
@@ -423,6 +455,7 @@ def main(cfg: DictConfig) -> None:
                 r.oracle_response[:200],
                 r.judge_score,
                 r.judge_reasoning,
+                r.verbalizer_prompt[:300],  # Truncate for display
             )
         wandb.log({"oracle_results": table})
 
@@ -438,8 +471,8 @@ def main(cfg: DictConfig) -> None:
         wandb.finish()
 
     logger.info("Oracle evaluation complete!")
-    if results.mean_score is not None:
-        logger.info(f"Final mean score: {results.mean_score:.2f}/5.0")
+    mean_score = results.mean_score()
+    logger.info(f"Final mean score: {mean_score:.2f}/5.0")
 
 
 if __name__ == "__main__":

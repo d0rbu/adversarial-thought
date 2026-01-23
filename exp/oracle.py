@@ -40,6 +40,7 @@ from nl_probes.base_experiment import (
 )
 from openai import OpenAI
 from peft import PeftModel
+from transformers import BitsAndBytesConfig
 
 from core.dtype import get_dtype
 
@@ -68,7 +69,7 @@ class OracleConfig:
     layer_percent: int = 50
 
     # Generation settings for oracle
-    max_new_tokens: int = 256
+    max_new_tokens: int = 2048
     temperature: float = 0.0
     do_sample: bool = False
 
@@ -78,11 +79,16 @@ class OracleConfig:
     # Device and dtype
     device: str = "cuda"
     dtype: str = "bfloat16"
+    load_in_8bit: bool = False
 
     # LLM judge settings
     judge_model: str = "gpt-5-nano"
-    judge_max_tokens: int = 256
+    judge_max_tokens: int = 2048
     judge_temperature: float = 1.0
+
+    # Token indices for activation extraction
+    token_start_idx: int = -10
+    token_end_idx: int = 0
 
 
 @dataclass(frozen=True)
@@ -94,12 +100,16 @@ class OracleResult:
     oracle_response: str
     judge_score: int  # 1-5 accuracy score from LLM judge
     judge_reasoning: str
+    judge_prompt: str  # User message sent to the LLM judge
+    verbalizer_prompt: str  # Raw prompt sent to the verbalizer (context + question)
 
     def __post_init__(self) -> None:
         assert (
             self.judge_score > 0 and self.judge_score <= 5
         ), "Judge score must be between 1 and 5"
         assert len(self.judge_reasoning) > 0, "Judge reasoning cannot be empty"
+        assert len(self.judge_prompt) > 0, "Judge prompt cannot be empty"
+        assert len(self.verbalizer_prompt) > 0, "Verbalizer prompt cannot be empty"
         assert len(self.oracle_response) > 0, "Oracle response cannot be empty"
         assert len(self.context) > 0, "Context cannot be empty"
         assert len(self.question) > 0, "Question cannot be empty"
@@ -142,6 +152,8 @@ Scoring rubric:
 2 - Mostly inaccurate: Response is largely wrong or irrelevant
 1 - Completely inaccurate: Response is entirely wrong or nonsensical
 
+The AI answering the question is an activation oracle, which is a model that has been fine-tuned to answer natural-language questions about embeddings that come from the internal activations of a target large language model. For these questions, we are giving the last 10 tokens of the context to the oracle, which includes end-of-turn and newline tokens.
+
 Respond in JSON format:
 {"reasoning": "<brief explanation>", "score": <1-5>}"""
 
@@ -178,7 +190,7 @@ def judge_response(
     model: str = "gpt-5-nano",
     max_tokens: int = 2048,
     temperature: float = 0.0,
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     """Use LLM judge to score oracle response accuracy.
 
     Args:
@@ -191,7 +203,8 @@ def judge_response(
         temperature: Temperature for judge model
 
     Returns:
-        Tuple of (score 1-5, reasoning)
+        Tuple of (score 1-5, reasoning, user_prompt)
+        user_prompt is the user message string sent to the judge
     """
     # Validate inputs
     assert (
@@ -265,7 +278,7 @@ def judge_response(
         logger.warning(f"Invalid score {score}, clamping to 1-5")
         score = max(1, min(5, score))
 
-    return score, reasoning
+    return score, reasoning, user_prompt
 
 
 # =============================================================================
@@ -339,7 +352,19 @@ def run_oracle_eval(
     # Load model and tokenizer
     tokenizer = load_tokenizer(config.model_name)
     assert tokenizer is not None, "Failed to load tokenizer"
-    base_model = load_model(config.model_name, dtype)
+
+    # Load model with optional 8-bit quantization
+    model_kwargs: dict[str, Any] = {}
+    if config.load_in_8bit:
+        logger.info("Loading model in 8-bit mode")
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=dtype,
+        )
+        model_kwargs["device_map"] = "auto" if device.type == "cuda" else None
+        model_kwargs["trust_remote_code"] = True
+
+    base_model = load_model(config.model_name, dtype, **model_kwargs)
     assert base_model is not None, "Failed to load model"
 
     # Convert to PeftModel for adapter support (accepts AutoModelForCausalLM)
@@ -378,9 +403,10 @@ def run_oracle_eval(
             "temperature": config.temperature if config.do_sample else 1.0,
             "max_new_tokens": config.max_new_tokens,
         },
-        # Only use last token activation
-        token_start_idx=-1,
-        token_end_idx=0,
+        token_start_idx=config.token_start_idx,
+        token_end_idx=config.token_end_idx,
+        add_generation_prompt=False,
+        enable_thinking=False,
         verbalizer_input_types=["tokens"],
         activation_input_types=["orig"] if target_name is None else ["lora"],
         eval_batch_size=config.batch_size,
@@ -423,6 +449,22 @@ def run_oracle_eval(
         # Add language_model as an alias to model for nl_probes compatibility
         base_model.language_model = base_model.model  # type: ignore[attr-defined]
 
+    # Fix for Qwen3 models: nl_probes expects model.model.layers but Qwen3 has model.model.model.layers
+    # We need to patch AFTER PeftModel is created because get_hf_submodule receives the PeftModel
+    is_qwen3 = "qwen" in config.model_name.lower() and "3" in config.model_name.lower()
+    # Patch on the PeftModel's base_model (which is what get_hf_submodule will access)
+    if is_qwen3 and hasattr(model, "base_model") and hasattr(model.base_model, "model"):
+        peft_base = model.base_model
+        peft_model_model = peft_base.model
+        # If peft_base.model doesn't have .layers but has .model.layers, patch it
+        if not hasattr(peft_model_model, "layers") and hasattr(
+            peft_model_model, "model"
+        ):
+            inner_model = peft_model_model.model
+            if hasattr(inner_model, "layers"):
+                # Add .layers attribute that points to .model.layers
+                peft_model_model.layers = inner_model.layers  # type: ignore[attr-defined]
+
     verbalizer_results = run_verbalizer(
         model=model,  # type: ignore[arg-type]
         tokenizer=tokenizer,
@@ -444,6 +486,21 @@ def run_oracle_eval(
         context, question = input_metadata[i]
         assert len(context) > 0, "Context cannot be empty"
         assert len(question) > 0, "Question cannot be empty"
+
+        # Construct the raw verbalizer prompt
+        # The verbalizer receives the question as a string prompt, and the context
+        # is used separately to collect activations. We format both here for clarity.
+        # Format context as text using chat template (just the context)
+        context_messages: list[dict[str, str]] = [{"role": "user", "content": context}]
+        context_text = tokenizer.apply_chat_template(  # type: ignore[attr-defined]
+            context_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert isinstance(context_text, str), "Context text must be a string"
+        # The verbalizer prompt is just the question, but we show context for reference
+        verbalizer_prompt = f"Context: {context_text}\n\nQuestion: {question}"
+        assert len(verbalizer_prompt) > 0, "Verbalizer prompt cannot be empty"
 
         # Get response - prefer token responses, then segment, then full_seq
         response = ""
@@ -468,7 +525,7 @@ def run_oracle_eval(
         assert len(response) > 0, "Response cannot be empty"
 
         # Judge the response using the LLM judge
-        judge_score, judge_reasoning = judge_response(
+        judge_score, judge_reasoning, judge_prompt = judge_response(
             context=context,
             question=question,
             response=response,
@@ -480,6 +537,7 @@ def run_oracle_eval(
 
         assert 1 <= judge_score <= 5, f"Judge score must be 1-5, got {judge_score}"
         assert len(judge_reasoning) > 0, "Judge reasoning cannot be empty"
+        assert len(judge_prompt) > 0, "Judge prompt cannot be empty"
 
         result = OracleResult(
             context=context,
@@ -487,6 +545,8 @@ def run_oracle_eval(
             oracle_response=response,
             judge_score=judge_score,
             judge_reasoning=judge_reasoning,
+            judge_prompt=judge_prompt,
+            verbalizer_prompt=verbalizer_prompt,
         )
         all_results.append(result)
 
@@ -547,6 +607,8 @@ def save_oracle_results(results: OracleEvalResults, output_path: str | Path) -> 
                 "oracle_response": r.oracle_response,
                 "judge_score": r.judge_score,
                 "judge_reasoning": r.judge_reasoning,
+                "judge_prompt": r.judge_prompt,
+                "verbalizer_prompt": r.verbalizer_prompt,
             }
             for r in results.results
         ],

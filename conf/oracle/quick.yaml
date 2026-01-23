@@ -22,11 +22,15 @@ do_sample: false
 # Batch size for evaluation
 batch_size: 32
 
+# Token indices for activation extraction
+token_start_idx: -10
+token_end_idx: 0
+
 # Context prompts source - override for quick testing
 context:
   source: custom
   custom_prompts:
-  - The capital of France is Paris.
+  - The capital of France is Paris!
   - Python is a programming language.
   # Limit for dataset source (10 samples for speed/debugging)
   n_samples: 10

@@ -20,6 +20,10 @@ do_sample: false
 # Batch size for evaluation
 batch_size: 32
 
+# Token indices for activation extraction
+token_start_idx: -10
+token_end_idx: 0
+
 # Context prompts source
 context:
   # Source: "dataset" or "custom"

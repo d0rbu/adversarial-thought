@@ -14,23 +14,22 @@ from __future__ import annotations
 
 TRAIN_QUESTIONS: list[str] = [
     # Token/text prediction (verifiable from context)
-    "What word or token comes immediately before this point?",
     "What is the last word the user typed?",
-    "What punctuation mark, if any, precedes this position?",
-    "How many sentences are in the preceding text?",
+    "What is the last punctuation mark, if any, in the text?",
+    "How many sentences are in the text?",
     # Content extraction (verifiable from context)
-    "What is the main topic of this text?",
-    "What named entities (people, places, organizations) appear in this text?",
+    "What is the main topic of the text?",
+    "What named entities (people, places, organizations) appear in the text?",
     "What numbers or quantities are mentioned?",
     "What question did the user ask, if any?",
     # Factual grounding (verifiable from context)
-    "What facts or claims are stated in this text?",
+    "What facts or claims are stated in the text?",
     "What action is the user requesting?",
     "What is the subject of the conversation?",
     # Format/structure (verifiable from context)
-    "Is this text a question, statement, or command?",
+    "Is the text a question, statement, or command?",
     "What language is this text written in?",
-    "Is there code in this text? If so, what programming language?",
+    "Is there code in the text? If so, what programming language?",
 ]
 
 # =============================================================================
@@ -40,8 +39,8 @@ TRAIN_QUESTIONS: list[str] = [
 
 VAL_QUESTIONS: list[str] = [
     # Token/text prediction
-    "What are the last three words before this point?",
-    "What character or symbol ends the previous sentence?",
+    "Can you predict the last three words?",
+    "What is the final character or symbol?",
     "Is the text complete or cut off mid-sentence?",
     # Content extraction
     "Summarize this text in one sentence.",

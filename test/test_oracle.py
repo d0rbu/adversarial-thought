@@ -38,6 +38,12 @@ response_strings = st.text(min_size=1, max_size=1000)
 # Strategy for judge reasoning strings
 reasoning_strings = st.text(min_size=1, max_size=500)
 
+# Strategy for judge prompt strings (JSON format)
+judge_prompt_strings = st.text(min_size=1, max_size=2000)
+
+# Strategy for verbalizer prompt strings
+verbalizer_prompt_strings = st.text(min_size=1, max_size=2000)
+
 
 # =============================================================================
 # Tests for OracleResult
@@ -55,12 +61,16 @@ class TestOracleResult:
             oracle_response="Test response",
             judge_score=4,
             judge_reasoning="Good response",
+            judge_prompt="Test user prompt",
+            verbalizer_prompt="Test verbalizer prompt",
         )
         assert result.context == "Test context"
         assert result.question == "Test question?"
         assert result.oracle_response == "Test response"
         assert result.judge_score == 4
         assert result.judge_reasoning == "Good response"
+        assert result.judge_prompt == "Test user prompt"
+        assert result.verbalizer_prompt == "Test verbalizer prompt"
 
     def test_raises_for_invalid_score_too_low(self) -> None:
         """Test that OracleResult raises for score < 1."""
@@ -71,6 +81,8 @@ class TestOracleResult:
                 oracle_response="Test",
                 judge_score=0,
                 judge_reasoning="Test",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
 
     def test_raises_for_invalid_score_too_high(self) -> None:
@@ -82,6 +94,8 @@ class TestOracleResult:
                 oracle_response="Test",
                 judge_score=6,
                 judge_reasoning="Test",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
 
     def test_raises_for_empty_reasoning(self) -> None:
@@ -93,6 +107,8 @@ class TestOracleResult:
                 oracle_response="Test",
                 judge_score=3,
                 judge_reasoning="",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
 
     def test_raises_for_empty_response(self) -> None:
@@ -104,6 +120,8 @@ class TestOracleResult:
                 oracle_response="",
                 judge_score=3,
                 judge_reasoning="Test",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
 
     def test_raises_for_empty_context(self) -> None:
@@ -115,6 +133,8 @@ class TestOracleResult:
                 oracle_response="Test",
                 judge_score=3,
                 judge_reasoning="Test",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
 
     def test_raises_for_empty_question(self) -> None:
@@ -126,6 +146,34 @@ class TestOracleResult:
                 oracle_response="Test",
                 judge_score=3,
                 judge_reasoning="Test",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
+            )
+
+    def test_raises_for_empty_judge_prompt(self) -> None:
+        """Test that OracleResult raises for empty judge prompt."""
+        with pytest.raises(AssertionError, match="Judge prompt cannot be empty"):
+            OracleResult(
+                context="Test",
+                question="Test?",
+                oracle_response="Test",
+                judge_score=3,
+                judge_reasoning="Test",
+                judge_prompt="",
+                verbalizer_prompt="Test verbalizer prompt",
+            )
+
+    def test_raises_for_empty_verbalizer_prompt(self) -> None:
+        """Test that OracleResult raises for empty verbalizer prompt."""
+        with pytest.raises(AssertionError, match="Verbalizer prompt cannot be empty"):
+            OracleResult(
+                context="Test",
+                question="Test?",
+                oracle_response="Test",
+                judge_score=3,
+                judge_reasoning="Test",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="",
             )
 
     @given(
@@ -134,6 +182,8 @@ class TestOracleResult:
         response=response_strings,
         score=judge_scores,
         reasoning=reasoning_strings,
+        prompt=judge_prompt_strings,
+        verbalizer_prompt=verbalizer_prompt_strings,
     )
     @settings(max_examples=50)
     def test_property_valid_result_creation(
@@ -143,6 +193,8 @@ class TestOracleResult:
         response: str,
         score: int,
         reasoning: str,
+        prompt: str,
+        verbalizer_prompt: str,
     ) -> None:
         """Property: Can create OracleResult with any valid inputs."""
         result = OracleResult(
@@ -151,12 +203,16 @@ class TestOracleResult:
             oracle_response=response,
             judge_score=score,
             judge_reasoning=reasoning,
+            judge_prompt=prompt,
+            verbalizer_prompt=verbalizer_prompt,
         )
         assert result.context == context
         assert result.question == question
         assert result.oracle_response == response
         assert result.judge_score == score
         assert result.judge_reasoning == reasoning
+        assert result.judge_prompt == prompt
+        assert result.verbalizer_prompt == verbalizer_prompt
         assert 1 <= result.judge_score <= 5
 
 
@@ -178,6 +234,8 @@ class TestOracleEvalResults:
                 oracle_response="Response 1",
                 judge_score=4,
                 judge_reasoning="Good",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
             OracleResult(
                 context="Context 2",
@@ -185,6 +243,8 @@ class TestOracleEvalResults:
                 oracle_response="Response 2",
                 judge_score=5,
                 judge_reasoning="Excellent",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
         ]
         eval_results = OracleEvalResults(config=config, results=results)
@@ -201,6 +261,8 @@ class TestOracleEvalResults:
                 oracle_response="R1",
                 judge_score=3,
                 judge_reasoning="OK",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
             OracleResult(
                 context="C2",
@@ -208,6 +270,8 @@ class TestOracleEvalResults:
                 oracle_response="R2",
                 judge_score=5,
                 judge_reasoning="Great",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
             OracleResult(
                 context="C3",
@@ -215,6 +279,8 @@ class TestOracleEvalResults:
                 oracle_response="R3",
                 judge_score=4,
                 judge_reasoning="Good",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
         ]
         eval_results = OracleEvalResults(config=config, results=results)
@@ -245,6 +311,8 @@ class TestOracleEvalResults:
                 oracle_response=f"Response {i}",
                 judge_score=score,
                 judge_reasoning=f"Reasoning {i}",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
             for i, score in enumerate(scores)
         ]
@@ -269,6 +337,8 @@ class TestOracleEvalResults:
                 oracle_response=f"Response {i}",
                 judge_score=score,
                 judge_reasoning=f"Reasoning {i}",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
             for i, score in enumerate(scores)
         ]
@@ -296,6 +366,8 @@ class TestComputeMetrics:
                 oracle_response="Response 1",
                 judge_score=4,
                 judge_reasoning="Good",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
             OracleResult(
                 context="Context 2",
@@ -303,6 +375,8 @@ class TestComputeMetrics:
                 oracle_response="Response 2",
                 judge_score=5,
                 judge_reasoning="Excellent",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             ),
         ]
         eval_results = OracleEvalResults(config=config, results=results)
@@ -348,6 +422,8 @@ class TestComputeMetrics:
                 oracle_response=f"Response {i}",
                 judge_score=score,
                 judge_reasoning=f"Reasoning {i}",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
             for i, score in enumerate(scores)
         ]
@@ -380,6 +456,8 @@ class TestComputeMetrics:
                 oracle_response=f"Response {i}",
                 judge_score=score,
                 judge_reasoning=f"Reasoning {i}",
+                judge_prompt="Test user prompt",
+                verbalizer_prompt="Test verbalizer prompt",
             )
             for i, score in enumerate(scores)
         ]

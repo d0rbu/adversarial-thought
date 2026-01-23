@@ -3,6 +3,7 @@ defaults:
 - _self_
 - oracle: default
 - data: dolci_sft
+- model: gemma3_1b
 
 # Experiment metadata
 experiment:
@@ -23,6 +24,7 @@ wandb:
 hardware:
   device: cuda
   dtype: bfloat16
+  load_in_8bit: false
 
 # Questions configuration
 questions:
