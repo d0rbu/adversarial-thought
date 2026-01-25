@@ -32,5 +32,4 @@ context:
   custom_prompts:
   - The capital of France is Paris!
   - Python is a programming language.
-  # Limit for dataset source (10 samples for speed/debugging)
   n_samples: 10

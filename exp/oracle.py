@@ -192,14 +192,17 @@ def format_tokenized_context(context: str, tokenizer: PreTrainedTokenizer | Any)
     return "|".join(tokens)
 
 
+NUM_ATTEMPTS = 3
+
+
 def judge_response(
     context: str,
     question: str,
     response: str,
     tokenizer: PreTrainedTokenizer | Any,
     model: str = "gpt-5-nano",
-    max_tokens: int = 4096,
-    temperature: float = 0.0,
+    max_tokens: int = 8192,
+    temperature: float = 1.0,
 ) -> tuple[int, str, str]:
     """Use LLM judge to score oracle response accuracy.
 
@@ -246,47 +249,58 @@ def judge_response(
         response=response,
     )
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_completion_tokens=max_tokens,
-    )
+    for attempt_idx in range(NUM_ATTEMPTS):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+            )
 
-    assert completion is not None, "Completion cannot be None"
-    assert len(completion.choices) > 0, "Completion must have at least one choice"
-    assert completion.choices[0].message is not None, "Message cannot be None"
+            response_text = completion.choices[0].message.content
 
-    response_text = completion.choices[0].message.content
-    assert response_text, "Response was truncated or empty"
+            # Parse JSON response - handle potential markdown code blocks
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
 
-    # Parse JSON response - handle potential markdown code blocks
-    if "```json" in response_text:
-        response_text = response_text.split("```json")[1].split("```")[0]
-    elif "```" in response_text:
-        response_text = response_text.split("```")[1].split("```")[0]
+            result = json.loads(response_text.strip())
+            assert isinstance(result, dict), "Judge response must be a JSON object"
+            assert (
+                "score" in result and "reasoning" in result
+            ), "Judge response must have 'score' and 'reasoning' fields"
 
-    result = json.loads(response_text.strip())
-    assert isinstance(result, dict), "Judge response must be a JSON object"
-    assert (
-        "score" in result and "reasoning" in result
-    ), "Judge response must have 'score' and 'reasoning' fields"
+            score_raw = result.get("score", 0)
+            assert isinstance(score_raw, int), "Score must be an integer"
+            score = int(score_raw)
 
-    score_raw = result.get("score", 0)
-    assert isinstance(score_raw, int), "Score must be an integer"
-    score = int(score_raw)
+            reasoning = result["reasoning"]
+            assert isinstance(reasoning, str), "Reasoning must be a string"
+            assert len(reasoning) > 0, "Reasoning cannot be empty"
 
-    reasoning = result["reasoning"]
-    assert isinstance(reasoning, str), "Reasoning must be a string"
-    assert len(reasoning) > 0, "Reasoning cannot be empty"
+            # Validate and clamp score range
+            if not 1 <= score <= 5:
+                logger.warning(f"Invalid score {score}, clamping to 1-5")
+                score = max(1, min(5, score))
 
-    # Validate and clamp score range
-    if not 1 <= score <= 5:
-        logger.warning(f"Invalid score {score}, clamping to 1-5")
-        score = max(1, min(5, score))
+            break
+        except Exception as e:
+            logger.warning(f"Attempt {attempt_idx + 1} failed: {e}")
+            continue
+    else:
+        should_continue = input(
+            f"Failed to get response after {NUM_ATTEMPTS} attempts, prompt:\n{user_prompt}\n\nContinue? (Y/n)"
+        )
+        if should_continue.strip()[0].lower() == "n":
+            raise ValueError("Failed to get response after multiple attempts")
+        else:
+            score = int(input("Enter score (1-5): "))
+            reasoning = "Manual intervention required"
 
     return score, reasoning, user_prompt
 

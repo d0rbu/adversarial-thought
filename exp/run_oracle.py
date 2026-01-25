@@ -400,18 +400,46 @@ def main(cfg: DictConfig) -> None:
     assert len(questions) > 0, "Must have at least one question"
     assert len(context_prompts) > 0, "Must have at least one context prompt"
 
-    # Assign one random question to each context (deterministic based on seed)
+    # If n_samples is specified and we have fewer contexts, repeat contexts to reach n_samples
     seed = assert_type(cfg.experiment.seed, int)
     random.seed(seed)
+
+    if (
+        hasattr(cfg.oracle.context, "n_samples")
+        and cfg.oracle.context.n_samples is not None
+    ):
+        n_samples = assert_type(cfg.oracle.context.n_samples, int)
+        assert n_samples > 0, f"n_samples must be positive, got {n_samples}"
+        if len(context_prompts) < n_samples:
+            # Repeat contexts to reach n_samples
+            original_count = len(context_prompts)
+            # Use random.choices to sample with replacement, ensuring we get exactly n_samples
+            context_prompts = random.choices(context_prompts, k=n_samples)
+            logger.info(
+                f"Repeated {original_count} contexts to reach n_samples={n_samples} "
+                f"(each context will appear ~{n_samples / original_count:.1f} times on average)"
+            )
+        elif len(context_prompts) > n_samples:
+            # Limit to n_samples (shouldn't happen if get_context_prompts is working correctly,
+            # but handle it just in case)
+            random.shuffle(context_prompts)
+            context_prompts = context_prompts[:n_samples]
+            logger.info(f"Limited to {n_samples} contexts")
+        # else: len(context_prompts) == n_samples, no change needed
+
+    # Assign one random question to each context (deterministic based on seed)
+    # This will naturally distribute questions across repeated contexts
     context_question_pairs: list[tuple[str, str]] = [
         (context, random.choice(questions)) for context in context_prompts
     ]
 
+    unique_contexts = len(set(context_prompts))
     logger.info(
-        f"Using {len(questions)} available questions, {len(context_prompts)} context prompts"
+        f"Using {len(questions)} available questions, {unique_contexts} unique context prompts"
     )
     logger.info(
-        f"Assigned one question per context (total {len(context_question_pairs)} pairs)"
+        f"Created {len(context_question_pairs)} (context, question) pairs "
+        f"({len(context_question_pairs) / unique_contexts:.1f} questions per context on average)"
     )
 
     # Initialize W&B if enabled

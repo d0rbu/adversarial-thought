@@ -18,7 +18,7 @@ temperature: 0.0
 do_sample: false
 
 # Batch size for evaluation
-batch_size: 4
+batch_size: 5
 
 # Token indices for activation extraction
 token_start_idx: -10
@@ -32,4 +32,4 @@ context:
   # Source: "dataset" or "custom"
   source: dataset
   # For dataset source - number of samples
-  n_samples: 1
+  n_samples: 100
