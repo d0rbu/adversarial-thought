@@ -15,19 +15,26 @@ This project investigates **activation oracles as an attack surface** for langua
 
 ```
 adversarial-thought/
-├── conf/                    # Hydra configuration files
+├── conf/                   # Hydra configuration files
 │   ├── config.yaml         # Main config for training
 │   ├── eval_config.yaml    # Main config for evaluation
+│   ├── oracle_config.yaml  # Main config for oracle evaluation
 │   ├── model/              # Model configurations
-│   │   └── qwen3_8b.yaml  # Qwen3-8B config
+│   │   ├── gemma3_1b.yaml  # Gemma3-1B config
+│   │   └── qwen3_8b.yaml   # Qwen3-8B config
 │   ├── data/               # Dataset configurations
 │   │   └── dolci_sft.yaml  # Dolci-Instruct-SFT config
 │   ├── training/           # Training configurations
 │   │   └── default.yaml    # Default training hyperparameters
-│   └── eval/               # Evaluation configurations
-│       ├── default.yaml    # Default eval tasks
-│       ├── quick.yaml      # Quick eval for testing
-│       └── full.yaml       # Full benchmark suite
+│   ├── eval/               # Evaluation configurations
+│   │   ├── baseline.yaml   # Baseline model eval tasks
+│   │   ├── quick.yaml      # Quick eval for testing
+│   │   └── sft.yaml        # SFT finetuned model eval tasks
+│   └── oracle/             # Oracle evaluation configurations
+│       ├── default.yaml    # Default oracle eval config
+│       ├── quick.yaml      # Quick oracle eval for testing
+│       ├── quick_dataset.yaml # Quick oracle eval with dataset
+│       └── sft.yaml        # Oracle eval for SFT finetuned models
 ├── core/                    # Core utilities
 │   ├── data.py             # Dataset loading utilities
 │   ├── dtype.py            # Torch dtype utilities
@@ -35,17 +42,35 @@ adversarial-thought/
 │   └── type.py             # Type assertion utilities
 ├── exp/                     # Experiment code
 │   ├── sft_finetune.py     # SFT baseline finetuning
-│   └── evaluate.py         # Model evaluation with lm-eval
+│   ├── evaluate.py         # Model evaluation with lm-eval
+│   ├── oracle.py           # Activation oracle utilities
+│   └── run_oracle.py       # Oracle evaluation script
 ├── test/                    # Test suite
 │   ├── conftest.py         # Pytest fixtures
 │   ├── test_core.py        # Core utility tests
 │   ├── test_data.py        # Data loading tests
-│   ├── test_evaluate.py    # Evaluation tests
+│   ├── test_evaluate.py   # Evaluation tests
 │   ├── test_exp.py         # Experiment tests
-│   ├── test_questions.py   # Questions module tests
+│   ├── test_oracle.py      # Oracle tests
+│   ├── test_questions.py  # Questions module tests
 │   └── test_sft_finetune.py # SFT finetuning tests
+├── script/                  # Shell scripts for running experiments
+│   ├── run_sft.sh          # Run SFT finetuning
+│   ├── run_eval.sh         # Run evaluation
+│   ├── run_eval_baseline.sh # Run baseline evaluation
+│   ├── run_eval_sft.sh     # Run SFT evaluation
+│   ├── run_eval_sft_quick.sh # Quick SFT evaluation
+│   ├── run_oracle.sh       # Run oracle evaluation
+│   ├── run_oracle_baseline.sh # Run baseline oracle eval
+│   ├── run_oracle_sft.sh   # Run SFT oracle eval
+│   ├── run_oracle_quick.sh # Quick oracle eval
+│   ├── run_oracle_quick_gemma.sh # Quick oracle eval with Gemma
+│   └── run_oracle_sft_quick.sh # Quick SFT oracle eval
+├── out/                     # Experiment outputs (model checkpoints, results)
+├── hydra/                   # Hydra output logs
 ├── .pre-commit-config.yaml  # Pre-commit hooks
 ├── pyproject.toml          # Project configuration
+├── README.md               # Project README
 └── AGENTS.md               # This file
 ```
 
@@ -107,8 +132,11 @@ uv run python -m exp.evaluate
 # Quick evaluation (limited samples for testing)
 uv run python -m exp.evaluate eval=quick
 
-# Full benchmark evaluation
-uv run python -m exp.evaluate eval=full
+# Baseline model evaluation
+uv run python -m exp.evaluate eval=baseline
+
+# SFT finetuned model evaluation
+uv run python -m exp.evaluate eval=sft
 
 # Evaluate a finetuned model with PEFT adapter
 uv run python -m exp.evaluate eval.peft_adapter_path=out/sft_baseline
@@ -123,18 +151,50 @@ uv run python -m exp.evaluate eval.limit=100 eval.tasks='[hellaswag]'
 uv run python -m exp.evaluate wandb.enabled=false
 ```
 
+### Running Oracle Evaluation
+
+```bash
+# Run oracle evaluation with default config
+uv run python -m exp.run_oracle
+
+# Quick oracle evaluation (limited questions for testing)
+uv run python -m exp.run_oracle oracle=quick
+
+# Oracle evaluation on SFT finetuned model
+uv run python -m exp.run_oracle oracle=sft
+
+# Oracle evaluation with dataset
+uv run python -m exp.run_oracle oracle=quick_dataset
+
+# Override number of questions
+uv run python -m exp.run_oracle questions.n_questions=10
+
+# Use different question split (train, val, or all)
+uv run python -m exp.run_oracle questions.split=val
+
+# Evaluate specific model adapter
+uv run python -m exp.run_oracle oracle.target_adapter_path=out/sft_baseline
+
+# Disable W&B logging
+uv run python -m exp.run_oracle wandb.enabled=false
+```
+
+**Note**: Oracle evaluation requires `OPENAI_API_KEY` environment variable for the LLM judge. Set it in your environment or in a `.env` file in the project root.
+
 ## Configuration System
 
 We use [Hydra](https://hydra.cc/) for configuration management. The main configs are:
 
 - **config.yaml**: Main config for SFT training experiments
 - **eval_config.yaml**: Main config for model evaluation
+- **oracle_config.yaml**: Main config for activation oracle evaluation
 
 Config groups:
 - **model/**: Model architecture, tokenizer, and LoRA settings
 - **data/**: Dataset loading, splits, and tokenization
 - **training/**: Training hyperparameters and optimization
-- **eval/**: Evaluation tasks and settings (default, quick, full)
+- **eval/**: Evaluation tasks and settings (baseline, quick, sft)
+- **oracle/**: Oracle evaluation settings (default, quick, quick_dataset, sft)
 
 ### Config Overrides
 
@@ -163,8 +223,10 @@ uv run python -m exp.sft_finetune \
 
 ### Phase 2: Oracle Question Generation
 - [x] Design question set Q for activation oracle probing
-- [ ] Generate QA pairs from oracle on SFT data
-- [ ] Implement LLM judge for answer quality assessment
+- [x] Generate QA pairs from oracle on SFT data
+- [x] Implement LLM judge for answer quality assessment
+- [x] Implement oracle evaluation infrastructure (`exp/oracle.py`, `exp/run_oracle.py`)
+- [x] Add oracle evaluation configurations
 
 ### Phase 3: Adversarial Finetuning
 - [ ] Implement adversarial loss term (maximize oracle error)
@@ -217,6 +279,7 @@ When working on this codebase:
 2. Add experiment module in `exp/`
 3. Use `@hydra.main()` decorator with config path
 4. Add corresponding tests in `test/`
+5. Optionally add shell script in `script/` for convenience
 
 ### Adding New Datasets
 
@@ -245,6 +308,33 @@ for q in TRAIN_QUESTIONS:
 messages = to_chat_message("What is the topic?")
 # Returns: [{"role": "user", "content": "What is the topic?"}]
 ```
+
+## Oracle Module
+
+The `exp/oracle.py` module provides utilities for activation oracle evaluation:
+
+- `OracleConfig`: Configuration dataclass for oracle evaluation
+- `run_oracle_eval()`: Main function to run oracle evaluation on context-question pairs
+- Integration with `nl_probes` library for activation probing
+- LLM judge scoring (requires `OPENAI_API_KEY`)
+
+### Usage
+
+```python
+from exp.oracle import OracleConfig, run_oracle_eval
+
+config = OracleConfig(
+    model_name="Qwen/Qwen3-8B",
+    oracle_path="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
+    target_adapter_path="out/sft_baseline",
+)
+context_question_pairs = [
+    ("The capital of France is Paris.", "What is the topic?"),
+]
+results = run_oracle_eval(config, context_question_pairs)
+```
+
+The `exp/run_oracle.py` script provides a Hydra-based CLI for running oracle evaluations with various configurations.
 
 ## Dependencies
 
