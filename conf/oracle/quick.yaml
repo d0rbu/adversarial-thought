@@ -3,10 +3,10 @@
 # Inherits from default.yaml via main config defaults
 
 # Base model (must match the oracle's training base)
-model_name: google/gemma-3-1b-it
+model_name: Qwen/Qwen3-8B
 
 # Oracle LoRA path from HuggingFace
-oracle_path: adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it
+oracle_path: adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B
 
 # Target adapter path (null = evaluate base model activations)
 target_adapter_path:
@@ -24,7 +24,10 @@ batch_size: 10
 
 # Token indices for activation extraction
 token_start_idx: -10
-token_end_idx: 0
+token_end_idx: -2
+
+# Repeat count (applies to segment or full_seq depending on detected input type)
+repeats: 10
 
 # Context prompts source - override for quick testing
 context:

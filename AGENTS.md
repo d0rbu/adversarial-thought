@@ -19,7 +19,7 @@ adversarial-thought/
 │   ├── config.yaml         # Main config for training
 │   ├── eval_config.yaml    # Main config for evaluation
 │   ├── model/              # Model configurations
-│   │   └── gemma3_1b.yaml  # Gemma-3-1B-IT config
+│   │   └── qwen3_8b.yaml  # Qwen3-8B config
 │   ├── data/               # Dataset configurations
 │   │   └── dolci_sft.yaml  # Dolci-Instruct-SFT config
 │   ├── training/           # Training configurations
@@ -92,7 +92,7 @@ uv run python -m exp.sft_finetune
 uv run python -m exp.sft_finetune experiment.name=my_exp training.batch_size=8
 
 # Use different config combinations
-uv run python -m exp.sft_finetune model=gemma3_1b data=dolci_sft
+uv run python -m exp.sft_finetune model=qwen3_8b data=dolci_sft
 
 # Disable W&B logging for local runs
 uv run python -m exp.sft_finetune wandb.enabled=false

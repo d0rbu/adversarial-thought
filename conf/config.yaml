@@ -1,14 +1,14 @@
 # Default configuration for adversarial-thought experiments
 defaults:
 - _self_
-- model: gemma3_1b
+- model: qwen3_8b
 - data: dolci_sft
 - training: default
 
 # Experiment metadata
 experiment:
   name: sft_baseline
-  seed: 42
+  seed: 0
   output_dir: out/${experiment.name}
 
 # Weights & Biases logging
@@ -23,7 +23,7 @@ wandb:
 # Hardware settings
 hardware:
   device: cuda
-  dtype: bfloat16
+  dtype: float16
   compile: true
 
 # Hydra settings

@@ -24,10 +24,13 @@ batch_size: 5
 
 # Token indices for activation extraction
 token_start_idx: -10
-token_end_idx: 0
+token_end_idx: -2
+
+# Repeat count (applies to segment or full_seq depending on detected input type)
+repeats: 10
 
 # Context prompts source - use dataset instead of custom
 context:
   source: dataset
-  # Limit for dataset source (20 samples for speed/debugging)
-  n_samples: 20
+  # Limit for dataset source (25 samples for speed/debugging)
+  n_samples: 5

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# General evaluation script
+# General evaluation script (uses Qwen3-8B by default)
 # Usage: ./script/run_eval.sh [hydra overrides...]
 # Examples:
 #   ./script/run_eval.sh                              # Use default eval config
@@ -12,4 +12,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-uv run python -m exp.evaluate "$@"
+uv run python -m exp.evaluate \
+    model.load_in_8bit=false \
+    "$@"

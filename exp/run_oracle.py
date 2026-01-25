@@ -225,6 +225,9 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
         if hasattr(oracle_cfg, "token_end_idx")
         else 0
     )
+    repeats = (
+        assert_type(oracle_cfg.repeats, int) if hasattr(oracle_cfg, "repeats") else 10
+    )
 
     assert (
         len(model_name) > 0 and len(oracle_path) > 0
@@ -243,6 +246,7 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
     assert (
         judge_temperature >= 0.0
     ), f"judge_temperature must be non-negative, got {judge_temperature}"
+    assert repeats > 0, f"repeats must be positive, got {repeats}"
 
     return OracleConfig(
         model_name=model_name,
@@ -261,6 +265,7 @@ def config_to_oracle_config(cfg: DictConfig) -> OracleConfig:
         judge_temperature=judge_temperature,
         token_start_idx=token_start_idx,
         token_end_idx=token_end_idx,
+        repeats=repeats,
     )
 
 

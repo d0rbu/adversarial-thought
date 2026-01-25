@@ -12,8 +12,8 @@ Usage:
     from exp.oracle import OracleConfig, run_oracle_eval
 
     config = OracleConfig(
-        model_name="google/gemma-3-1b-it",
-        oracle_path="adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it",
+        model_name="Qwen/Qwen3-8B",
+        oracle_path="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
         target_adapter_path="out/sft_baseline",
     )
     results = run_oracle_eval(config, questions, prompts)
@@ -25,7 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 from dotenv import load_dotenv
@@ -45,7 +45,7 @@ from transformers import BitsAndBytesConfig
 from core.dtype import get_dtype
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer
+    from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 
 # Load environment variables from .env file
 load_dotenv()
@@ -56,11 +56,13 @@ class OracleConfig:
     """Configuration for activation oracle evaluation."""
 
     # Base model (must match the oracle's base model)
-    model_name: str = "google/gemma-3-1b-it"
+    model_name: str = "Qwen/Qwen3-8B"
 
     # Oracle LoRA path on HuggingFace
     # Available oracles: https://huggingface.co/collections/adamkarvonen/activation-oracles
-    oracle_path: str = "adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it"
+    oracle_path: str = (
+        "adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B"
+    )
 
     # Target adapter path (our finetuned model) - None for base model
     target_adapter_path: str | None = None
@@ -89,6 +91,9 @@ class OracleConfig:
     # Token indices for activation extraction
     token_start_idx: int = -10
     token_end_idx: int = 0
+
+    # Repeat count for segment or full_seq input types (applies to whichever is used)
+    repeats: int = 10
 
 
 @dataclass(frozen=True)
@@ -285,6 +290,8 @@ def judge_response(
 # Oracle Evaluation
 # =============================================================================
 
+ORACLE_ADAPTER_NAME = "oracle"
+
 
 def run_oracle_eval(
     config: OracleConfig,
@@ -364,35 +371,68 @@ def run_oracle_eval(
         model_kwargs["device_map"] = "auto" if device.type == "cuda" else None
         model_kwargs["trust_remote_code"] = True
 
-    base_model = load_model(config.model_name, dtype, **model_kwargs)
+    base_model: AutoModelForCausalLM = load_model(
+        config.model_name, dtype, **model_kwargs
+    )
     assert base_model is not None, "Failed to load model"
 
-    # Convert to PeftModel for adapter support (accepts AutoModelForCausalLM)
-    adapter_name = "oracle"
-    # AutoModelForCausalLM is a subclass of torch.nn.Module, but type checker needs help
     model = PeftModel.from_pretrained(
-        cast("torch.nn.Module", base_model),
+        base_model,  # type: ignore[arg-type]
         config.oracle_path,
-        adapter_name=adapter_name,
+        adapter_name=ORACLE_ADAPTER_NAME,
     )
     model.eval()
-    # Bug in PEFT where loading an adapter with from_pretrained doesn't set _hf_peft_config_loaded
+
+    model.set_adapter(ORACLE_ADAPTER_NAME)
     base_model._hf_peft_config_loaded = True  # type: ignore[attr-defined]
 
-    # Load oracle adapter (already loaded above as "oracle")
-    logger.info(f"Loaded oracle: {config.oracle_path}")
-
-    # Load target adapter if specified (works with PeftModel)
+    # Load target adapter if specified
     target_name = None
     if config.target_adapter_path is not None:
         assert (
             len(config.target_adapter_path) > 0
         ), "target_adapter_path cannot be empty"
         logger.info(f"Loading target adapter: {config.target_adapter_path}")
-        target_name = load_lora_adapter(base_model, config.target_adapter_path)
+        # load_lora_adapter expects AutoModelForCausalLM but accepts PeftModel in practice
+        # Pass the base model instead, or use type ignore
+        target_name = load_lora_adapter(model, config.target_adapter_path)  # type: ignore[arg-type]
         assert (
             target_name is not None and target_name in model.peft_config
         ), "Failed to load target adapter"
+
+    # Determine verbalizer input type based on token indices
+    # If token_end_idx - token_start_idx == 1: use tokens
+    # If token_end_idx - token_start_idx > 1: use segment
+    # If token_end_idx - token_start_idx == 0: use full_seq
+    token_diff = config.token_end_idx - config.token_start_idx
+    if token_diff == 0:
+        verbalizer_input_types = ["full_seq"]
+        # For full_seq, we don't need segment indices, but set them to avoid errors
+        segment_start_idx = config.token_start_idx
+        segment_end_idx = config.token_end_idx
+        preferred_response_type = "full_seq"
+        segment_repeats = 0  # Not used for full_seq
+        full_seq_repeats = config.repeats
+    elif token_diff == 1 or token_diff == -1:
+        verbalizer_input_types = ["tokens"]
+        # For tokens, we don't need segment indices, but set them to avoid errors
+        segment_start_idx = config.token_start_idx
+        segment_end_idx = config.token_end_idx
+        preferred_response_type = "tokens"
+        segment_repeats = 0  # Not used for tokens
+        full_seq_repeats = 0  # Not used for tokens
+    else:  # token_diff > 1
+        verbalizer_input_types = ["segment"]
+        segment_start_idx = config.token_start_idx
+        segment_end_idx = config.token_end_idx
+        preferred_response_type = "segment"
+        segment_repeats = config.repeats
+        full_seq_repeats = 0  # Not used for segment
+
+    logger.info(
+        f"Using verbalizer input type: {preferred_response_type} "
+        f"(token_start_idx={config.token_start_idx}, token_end_idx={config.token_end_idx}, diff={token_diff}, repeats={config.repeats})"
+    )
 
     # Build VerbalizerEvalConfig
     verbalizer_config = VerbalizerEvalConfig(
@@ -405,9 +445,13 @@ def run_oracle_eval(
         },
         token_start_idx=config.token_start_idx,
         token_end_idx=config.token_end_idx,
+        segment_start_idx=segment_start_idx,
+        segment_end_idx=segment_end_idx,
+        segment_repeats=segment_repeats,
+        full_seq_repeats=full_seq_repeats,
         add_generation_prompt=False,
         enable_thinking=False,
-        verbalizer_input_types=["tokens"],
+        verbalizer_input_types=verbalizer_input_types,
         activation_input_types=["orig"] if target_name is None else ["lora"],
         eval_batch_size=config.batch_size,
     )
@@ -469,7 +513,7 @@ def run_oracle_eval(
         model=model,  # type: ignore[arg-type]
         tokenizer=tokenizer,
         verbalizer_prompt_infos=verbalizer_inputs,
-        verbalizer_lora_path=adapter_name,
+        verbalizer_lora_path=ORACLE_ADAPTER_NAME,
         target_lora_path=target_name,
         config=verbalizer_config,
         device=device,
@@ -502,21 +546,21 @@ def run_oracle_eval(
         verbalizer_prompt = f"Context: {context_text}\n\nQuestion: {question}"
         assert len(verbalizer_prompt) > 0, "Verbalizer prompt cannot be empty"
 
-        # Get response - prefer token responses, then segment, then full_seq
-        response = ""
-        if vr.token_responses:
+        # Get response - check all types (only one will have responses based on configured input type)
+        # Priority: segment > tokens > full_seq (segment is typically most informative)
+        if vr.segment_responses:
+            response = vr.segment_responses[-1]
+        elif vr.token_responses:
             reversed_token_responses = (
                 response
                 for response in reversed(vr.token_responses)
                 if response is not None
             )
-            response = next(reversed_token_responses, "")
-        elif vr.segment_responses:
-            response = vr.segment_responses[-1] if vr.segment_responses else ""
+            response = next(reversed_token_responses)
         elif vr.full_sequence_responses:
-            response = (
-                vr.full_sequence_responses[-1] if vr.full_sequence_responses else ""
-            )
+            response = vr.full_sequence_responses[-1]
+        else:
+            raise ValueError(f"No response found for pair {i}")
 
         if not response:
             logger.warning(f"Empty response for pair {i}")
@@ -557,8 +601,8 @@ def run_oracle_eval(
     # Cleanup adapters
     if target_name and target_name in model.peft_config:
         model.delete_adapter(target_name)
-    if adapter_name in model.peft_config:
-        model.delete_adapter(adapter_name)
+    if ORACLE_ADAPTER_NAME in model.peft_config:
+        model.delete_adapter(ORACLE_ADAPTER_NAME)
 
     # Create aggregated results
     assert len(all_results) > 0, "Must have at least one result"
@@ -625,8 +669,8 @@ if __name__ == "__main__":
     from core.questions import get_train_questions
 
     config = OracleConfig(
-        model_name="google/gemma-3-1b-it",
-        oracle_path="adamkarvonen/checkpoints_cls_latentqa_past_lens_gemma-3-1b-it",
+        model_name="Qwen/Qwen3-8B",
+        oracle_path="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
         target_adapter_path=None,
     )
 

@@ -31,7 +31,7 @@ class TestEvalConfig:
         """Test that default config has sensible values."""
         cfg = EvalConfig()
 
-        assert cfg.model_name == "google/gemma-3-1b-it"
+        assert cfg.model_name == "Qwen/Qwen3-8B"
         assert cfg.tokenizer_name is None
         assert cfg.peft_adapter_path is None
         assert "hellaswag" in cfg.tasks

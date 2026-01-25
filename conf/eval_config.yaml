@@ -1,7 +1,7 @@
 # Evaluation configuration for adversarial-thought experiments
 defaults:
 - _self_
-- model: gemma3_1b
+- model: qwen3_8b
 - eval: default
 
 # Experiment metadata
@@ -22,7 +22,7 @@ wandb:
 # Hardware settings
 hardware:
   device: cuda
-  dtype: bfloat16
+  dtype: float16
 
 # Hydra settings
 hydra:

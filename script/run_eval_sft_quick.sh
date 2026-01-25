@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 
 uv run python -m exp.evaluate \
     eval=quick \
+    model.load_in_8bit=false \
     eval.peft_adapter_path=out/sft_baseline \
     experiment.name=eval_sft_quick \
     experiment.output_dir=out/eval_sft_quick \

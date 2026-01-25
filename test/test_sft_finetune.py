@@ -48,8 +48,8 @@ class TestExperimentConfig:
         """Test that default config has sensible values."""
         cfg = ExperimentConfig()
 
-        assert cfg.model_name == "google/gemma-3-1b-it"
-        assert cfg.tokenizer_name == "google/gemma-3-1b-it"
+        assert cfg.model_name == "Qwen/Qwen3-8B"
+        assert cfg.tokenizer_name == "Qwen/Qwen3-8B"
         assert cfg.lora_enabled is True
         assert cfg.lora_r == 16
         assert cfg.lora_alpha == 32

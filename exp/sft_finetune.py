@@ -1,4 +1,4 @@
-"""Supervised Fine-Tuning (SFT) experiment for Gemma-3-1B on Dolci-Instruct-SFT."""
+"""Supervised Fine-Tuning (SFT) experiment for Qwen3-8B on Dolci-Instruct-SFT."""
 
 import random
 from dataclasses import dataclass, field
@@ -12,6 +12,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
     PreTrainedTokenizer,
     Trainer,
@@ -29,8 +30,8 @@ class ExperimentConfig:
     """Flattened experiment configuration for type safety."""
 
     # Model
-    model_name: str = "google/gemma-3-1b-it"
-    tokenizer_name: str = "google/gemma-3-1b-it"
+    model_name: str = "Qwen/Qwen3-8B"
+    tokenizer_name: str = "Qwen/Qwen3-8B"
 
     # LoRA
     lora_enabled: bool = True
@@ -69,6 +70,9 @@ class ExperimentConfig:
     # Hardware
     dtype: str = "bfloat16"
     device: str = "cuda"
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
+    attn_implementation: str = "sdpa"
 
     # Experiment
     seed: int = 42
@@ -112,13 +116,34 @@ def load_model_and_tokenizer(
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    # Set up quantization config if needed
+    quantization_config = None
+    if cfg.load_in_4bit:
+        logger.info("Loading model with 4-bit quantization")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch_dtype,
+        )
+    elif cfg.load_in_8bit:
+        logger.info("Loading model with 8-bit quantization")
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=torch_dtype,
+        )
+
     # Load model
+    model_kwargs: dict[str, Any] = {
+        "torch_dtype": torch_dtype,
+        "device_map": "auto" if cfg.device == "cuda" else None,
+        "trust_remote_code": True,
+        "attn_implementation": cfg.attn_implementation,
+    }
+    if quantization_config is not None:
+        model_kwargs["quantization_config"] = quantization_config
+
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
-        torch_dtype=torch_dtype,
-        device_map="auto" if cfg.device == "cuda" else None,
-        trust_remote_code=True,
-        attn_implementation="sdpa",
+        **model_kwargs,
     )
 
     # Apply LoRA if enabled
@@ -197,6 +222,9 @@ def config_to_experiment_config(cfg: DictConfig) -> ExperimentConfig:
         gradient_checkpointing=cfg.training.gradient_checkpointing,
         dtype=cfg.hardware.dtype,
         device=cfg.hardware.device,
+        load_in_4bit=cfg.model.load_in_4bit,
+        load_in_8bit=cfg.model.load_in_8bit,
+        attn_implementation=cfg.model.attn_implementation,
         seed=cfg.experiment.seed,
         output_dir=cfg.experiment.output_dir,
         wandb_enabled=cfg.wandb.enabled,

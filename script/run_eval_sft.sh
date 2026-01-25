@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 
 uv run python -m exp.evaluate \
     eval=sft \
+    model.load_in_8bit=false \
     experiment.name=eval_sft \
     experiment.output_dir=out/eval_sft \
     "$@"

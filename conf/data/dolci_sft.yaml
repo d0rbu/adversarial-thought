@@ -2,7 +2,7 @@
 name: allenai/Dolci-Instruct-SFT
 
 # Tokenization settings
-max_length: 2048
+max_length: 860
 truncation: true
 padding: longest
 max_messages_per_conversation: 3

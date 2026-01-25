@@ -186,7 +186,7 @@ class EvalConfig:
     """Configuration for model evaluation."""
 
     # Model settings
-    model_name: str = "google/gemma-3-1b-it"
+    model_name: str = "Qwen/Qwen3-8B"
     tokenizer_name: str | None = None  # Defaults to model_name if None
 
     # PEFT adapter settings (for finetuned models)
@@ -213,6 +213,8 @@ class EvalConfig:
     # Hardware settings
     device: str = "cuda"
     dtype: str = "bfloat16"
+    load_in_8bit: bool = False
+    load_in_4bit: bool = False
 
     # Output settings
     output_dir: str = "out/eval"
@@ -248,6 +250,24 @@ def create_lm_eval_model(cfg: EvalConfig) -> Gemma3CompatibleHFLM:
     torch_dtype = get_dtype(cfg.dtype)
     tokenizer_name = cfg.tokenizer_name or cfg.model_name
 
+    # Prepare model kwargs with quantization settings
+    model_kwargs: dict[str, Any] = {
+        "dtype": None,  # Set to None, torch_dtype will be used instead
+        "torch_dtype": torch_dtype,  # Pass torch_dtype via kwargs for Gemma3 compatibility
+        "batch_size": cfg.batch_size,
+        "max_batch_size": cfg.max_batch_size,
+        "trust_remote_code": True,
+        "device": cfg.device,
+    }
+
+    # Add quantization settings if enabled
+    if cfg.load_in_8bit:
+        logger.info("Loading model with 8-bit quantization")
+        model_kwargs["load_in_8bit"] = True
+    if cfg.load_in_4bit:
+        logger.info("Loading model with 4-bit quantization")
+        model_kwargs["load_in_4bit"] = True
+
     # Create model with optional PEFT adapter
     if cfg.peft_adapter_path is not None:
         logger.info(f"Loading PEFT adapter from: {cfg.peft_adapter_path}")
@@ -255,24 +275,14 @@ def create_lm_eval_model(cfg: EvalConfig) -> Gemma3CompatibleHFLM:
             pretrained=cfg.model_name,
             tokenizer=tokenizer_name,
             peft=cfg.peft_adapter_path,
-            dtype=None,  # Set to None, torch_dtype will be used instead
-            torch_dtype=torch_dtype,  # Pass torch_dtype via kwargs for Gemma3 compatibility
-            batch_size=cfg.batch_size,
-            max_batch_size=cfg.max_batch_size,
-            trust_remote_code=True,
-            device=cfg.device,
+            **model_kwargs,
         )
     else:
         logger.info("Loading base model (no PEFT adapter)")
         model = Gemma3CompatibleHFLM(
             pretrained=cfg.model_name,
             tokenizer=tokenizer_name,
-            dtype=None,  # Set to None, torch_dtype will be used instead
-            torch_dtype=torch_dtype,  # Pass torch_dtype via kwargs for Gemma3 compatibility
-            batch_size=cfg.batch_size,
-            max_batch_size=cfg.max_batch_size,
-            trust_remote_code=True,
-            device=cfg.device,
+            **model_kwargs,
         )
 
     return model
@@ -540,6 +550,12 @@ def config_to_eval_config(cfg: DictConfig) -> EvalConfig:
         limit=cfg.eval.limit if hasattr(cfg.eval, "limit") else None,
         device=device,
         dtype=dtype,
+        load_in_8bit=cfg.model.load_in_8bit
+        if hasattr(cfg.model, "load_in_8bit")
+        else False,
+        load_in_4bit=cfg.model.load_in_4bit
+        if hasattr(cfg.model, "load_in_4bit")
+        else False,
         output_dir=output_dir,
         seed=seed,
         wandb_enabled=wandb_enabled,
