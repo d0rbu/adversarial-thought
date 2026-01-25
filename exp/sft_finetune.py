@@ -68,7 +68,7 @@ class ExperimentConfig:
     gradient_checkpointing: bool = True
 
     # Hardware
-    dtype: str = "bfloat16"
+    dtype: str = "float16"
     device: str = "cuda"
     load_in_4bit: bool = False
     load_in_8bit: bool = False

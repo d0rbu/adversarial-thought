@@ -212,7 +212,7 @@ class EvalConfig:
 
     # Hardware settings
     device: str = "cuda"
-    dtype: str = "bfloat16"
+    dtype: str = "float16"
     load_in_8bit: bool = False
     load_in_4bit: bool = False
 

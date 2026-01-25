@@ -16,7 +16,12 @@ Usage:
         oracle_path="adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B",
         target_adapter_path="out/sft_baseline",
     )
-    results = run_oracle_eval(config, questions, prompts)
+    # Create (context, question) pairs - one question per context
+    context_question_pairs = [
+        ("The capital of France is Paris.", "What is the topic?"),
+        ("Machine learning models can learn patterns.", "What is being described?"),
+    ]
+    results = run_oracle_eval(config, context_question_pairs)
 """
 
 from __future__ import annotations
@@ -80,7 +85,7 @@ class OracleConfig:
 
     # Device and dtype
     device: str = "cuda"
-    dtype: str = "bfloat16"
+    dtype: str = "float16"
     load_in_8bit: bool = False
 
     # LLM judge settings
@@ -295,20 +300,18 @@ ORACLE_ADAPTER_NAME = "oracle"
 
 def run_oracle_eval(
     config: OracleConfig,
-    questions: list[str],
-    contexts: list[str],
+    context_question_pairs: list[tuple[str, str]],
 ) -> OracleEvalResults:
     """Run activation oracle evaluation on contexts with LLM judge scoring.
 
-    For each (question, context) pair:
+    For each (context, question) pair:
     1. Collect activations from the last token of the context
     2. Ask the oracle the question about those activations
     3. Have an LLM judge score the response accuracy (1-5)
 
     Args:
         config: Oracle configuration
-        questions: Questions to ask the oracle
-        contexts: Text contexts to collect activations from
+        context_question_pairs: List of (context, question) tuples to evaluate
 
     Returns:
         OracleEvalResults with individual results and mean score
@@ -316,17 +319,15 @@ def run_oracle_eval(
     # Validate inputs
     assert config is not None, "Config cannot be None"
     assert (
-        isinstance(questions, list) and len(questions) > 0
-    ), "Questions must be a non-empty list"
-    assert (
-        isinstance(contexts, list) and len(contexts) > 0
-    ), "Contexts must be a non-empty list"
+        isinstance(context_question_pairs, list) and len(context_question_pairs) > 0
+    ), "context_question_pairs must be a non-empty list"
     assert all(
-        isinstance(q, str) and len(q) > 0 for q in questions
-    ), "All questions must be non-empty strings"
+        isinstance(pair, tuple) and len(pair) == 2 for pair in context_question_pairs
+    ), "All pairs must be tuples of length 2"
     assert all(
-        isinstance(c, str) and len(c) > 0 for c in contexts
-    ), "All contexts must be non-empty strings"
+        isinstance(c, str) and len(c) > 0 and isinstance(q, str) and len(q) > 0
+        for c, q in context_question_pairs
+    ), "All contexts and questions must be non-empty strings"
 
     assert len(config.model_name) > 0, "model_name cannot be empty"
     assert len(config.oracle_path) > 0, "oracle_path cannot be empty"
@@ -456,35 +457,31 @@ def run_oracle_eval(
         eval_batch_size=config.batch_size,
     )
 
-    # Build verbalizer inputs for all (question, context) pairs
+    # Build verbalizer inputs for all (context, question) pairs
     verbalizer_inputs: list[VerbalizerInputInfo] = []
     input_metadata: list[tuple[str, str]] = []  # (context, question) pairs
 
-    for question in questions:
+    for context, question in context_question_pairs:
+        assert len(context) > 0, "Context cannot be empty"
         assert len(question) > 0, "Question cannot be empty"
-        for context in contexts:
-            assert len(context) > 0, "Context cannot be empty"
-            # Format context as chat message
-            context_messages: list[dict[str, str]] = [
-                {"role": "user", "content": context}
-            ]
+        # Format context as chat message
+        context_messages: list[dict[str, str]] = [{"role": "user", "content": context}]
 
-            verbalizer_inputs.append(
-                VerbalizerInputInfo(
-                    context_prompt=context_messages,
-                    verbalizer_prompt=question,
-                    ground_truth="",  # We use LLM judge, not exact match
-                )
+        verbalizer_inputs.append(
+            VerbalizerInputInfo(
+                context_prompt=context_messages,
+                verbalizer_prompt=question,
+                ground_truth="",  # We use LLM judge, not exact match
             )
-            input_metadata.append((context, question))
+        )
+        input_metadata.append((context, question))
 
     total_pairs = len(verbalizer_inputs)
-    expected_pairs = len(questions) * len(contexts)
-    assert (
-        total_pairs == expected_pairs
-    ), f"Expected {expected_pairs} pairs, got {total_pairs}"
+    assert total_pairs == len(
+        context_question_pairs
+    ), f"Expected {len(context_question_pairs)} pairs, got {total_pairs}"
     assert total_pairs > 0, "Must have at least one pair"
-    logger.info(f"Running oracle on {total_pairs} (question, context) pairs...")
+    logger.info(f"Running oracle on {total_pairs} (context, question) pairs...")
 
     # Fix for Gemma3 models: nl_probes expects model.language_model but Gemma3 uses model.model
     # The error trace shows: PeftModel -> base_model -> model.language_model
@@ -606,9 +603,9 @@ def run_oracle_eval(
 
     # Create aggregated results
     assert len(all_results) > 0, "Must have at least one result"
-    assert len(all_results) == len(questions) * len(
-        contexts
-    ), f"Expected {len(questions) * len(contexts)} results, got {len(all_results)}"
+    assert len(all_results) == len(
+        context_question_pairs
+    ), f"Expected {len(context_question_pairs)} results, got {len(all_results)}"
 
     eval_results = OracleEvalResults(config=config, results=all_results)
 
@@ -680,7 +677,15 @@ if __name__ == "__main__":
         "Machine learning models can learn patterns from data.",
     ]
 
-    results = run_oracle_eval(config, questions, contexts)
+    # Create pairs: assign one question to each context
+    import random
+
+    random.seed(42)
+    context_question_pairs = [
+        (context, random.choice(questions)) for context in contexts
+    ]
+
+    results = run_oracle_eval(config, context_question_pairs)
 
     for r in results.results:
         print(f"\nContext: {r.context[:50]}...")

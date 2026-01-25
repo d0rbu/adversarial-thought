@@ -90,9 +90,9 @@ class TestExperimentConfig:
         assert "new_module" not in cfg2.lora_target_modules
 
     def test_dtype_default(self) -> None:
-        """Test default dtype is bfloat16."""
+        """Test default dtype is float16."""
         cfg = ExperimentConfig()
-        assert cfg.dtype == "bfloat16"
+        assert cfg.dtype == "float16"
 
     def test_training_hyperparameters_defaults(self) -> None:
         """Test training hyperparameters have sensible defaults."""

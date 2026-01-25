@@ -14,6 +14,8 @@ cd "$(dirname "$0")/.."
 
 uv run python -m exp.run_oracle \
     oracle=sft \
+    model.load_in_8bit=false \
+    hardware.dtype=bfloat16 \
     experiment.name=oracle_sft \
     experiment.output_dir=out/oracle_sft \
     "$@"

@@ -14,6 +14,7 @@ cd "$(dirname "$0")/.."
 
 uv run python -m exp.run_oracle \
     oracle=quick \
+    oracle.target_adapter_path=out/sft_baseline \
     model.load_in_8bit=false \
     hardware.dtype=bfloat16 \
     experiment.name=oracle_quick \

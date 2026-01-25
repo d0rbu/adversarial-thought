@@ -399,8 +399,19 @@ def main(cfg: DictConfig) -> None:
 
     assert len(questions) > 0, "Must have at least one question"
     assert len(context_prompts) > 0, "Must have at least one context prompt"
+
+    # Assign one random question to each context (deterministic based on seed)
+    seed = assert_type(cfg.experiment.seed, int)
+    random.seed(seed)
+    context_question_pairs: list[tuple[str, str]] = [
+        (context, random.choice(questions)) for context in context_prompts
+    ]
+
     logger.info(
-        f"Using {len(questions)} questions and {len(context_prompts)} context prompts"
+        f"Using {len(questions)} available questions, {len(context_prompts)} context prompts"
+    )
+    logger.info(
+        f"Assigned one question per context (total {len(context_question_pairs)} pairs)"
     )
 
     # Initialize W&B if enabled
@@ -419,8 +430,7 @@ def main(cfg: DictConfig) -> None:
     oracle_cfg = config_to_oracle_config(cfg)
     results = run_oracle_eval(
         config=oracle_cfg,
-        questions=questions,
-        contexts=context_prompts,
+        context_question_pairs=context_question_pairs,
     )
 
     # Compute and log metrics

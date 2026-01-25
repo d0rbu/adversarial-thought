@@ -1,7 +1,4 @@
 # Quick test configuration for oracle evaluation
-# Uses minimal questions and contexts for fast testing
-# Inherits from default.yaml via main config defaults
-
 # Base model (must match the oracle's training base)
 model_name: Qwen/Qwen3-8B
 
@@ -20,7 +17,7 @@ temperature: 0.0
 do_sample: false
 
 # Batch size for evaluation
-batch_size: 10
+batch_size: 8
 
 # Token indices for activation extraction
 token_start_idx: -10

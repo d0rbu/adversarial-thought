@@ -15,4 +15,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-uv run python -m exp.run_oracle "$@"
+uv run python -m exp.run_oracle \
+    hardware.dtype=bfloat16 \
+    "$@"
