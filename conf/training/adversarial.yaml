@@ -1,0 +1,55 @@
+# Adversarial SFT training configuration
+# Extends default.yaml with adversarial-specific settings
+defaults:
+- default
+
+# Adversarial loss weight
+adversarial:
+  alpha: 1.0  # Weight for adversarial loss: final_loss = sft_loss + alpha * adv_loss
+
+  # Oracle configuration
+  oracle_path: adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B
+  layer_percent: 50  # Layer to extract activations from (as % of model depth)
+
+  # Activation extraction settings
+  token_start_idx: -10  # Start token index (negative = from end)
+  token_end_idx: -2     # End token index (negative = from end)
+  repeats: 10           # Number of repeats for segment activations
+
+# Inherit all other settings from default.yaml
+# Training hyperparameters
+num_epochs: 1
+batch_size: 1
+gradient_accumulation_steps: 8
+effective_batch_size: 8  # batch_size * gradient_accumulation_steps
+
+# Optimizer settings
+learning_rate: 2.0e-5
+weight_decay: 0.01
+warmup_ratio: 0.03
+lr_scheduler_type: linear
+
+# Gradient settings
+max_grad_norm: 1.0
+gradient_checkpointing: false
+
+# Logging and checkpointing
+logging_steps: 10
+eval_steps: 200
+save_steps: 200
+save_total_limit: 3
+
+# Evaluation
+eval_strategy: steps
+metric_for_best_model: eval_loss
+greater_is_better: false
+load_best_model_at_end: true
+
+# Mixed precision
+fp16: true
+bf16: false
+
+# Misc
+dataloader_pin_memory: true
+remove_unused_columns: true
+report_to: wandb

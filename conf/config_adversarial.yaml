@@ -1,12 +1,13 @@
-# Evaluation configuration for adversarial-thought experiments
+# Configuration for adversarial SFT training
 defaults:
 - _self_
 - model: qwen3_8b
-- eval: default
+- data: dolci_sft
+- training: adversarial
 
 # Experiment metadata
 experiment:
-  name: eval_baseline
+  name: adversarial_sft
   seed: 0
   output_dir: out/${experiment.name}
 
@@ -14,15 +15,16 @@ experiment:
 wandb:
   enabled: true
   project: adversarial-thought
-  entity:
+  entity:       # Set to your W&B entity or leave null for default
   tags:
-  - eval
-  - baseline
+  - sft
+  - adversarial
 
 # Hardware settings
 hardware:
   device: cuda
   dtype: float16
+  compile: false  # Disable compile for adversarial training (may cause issues with hooks)
 
 # Hydra settings
 hydra:

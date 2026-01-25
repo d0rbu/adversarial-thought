@@ -41,13 +41,13 @@ from nl_probes.base_experiment import (
     load_lora_adapter,
     load_model,
     load_tokenizer,
-    run_verbalizer,
 )
 from openai import OpenAI
 from peft import PeftModel
 from transformers import BitsAndBytesConfig
 
 from core.dtype import get_dtype
+from core.verbalizer import run_verbalizer
 
 if TYPE_CHECKING:
     from transformers import AutoModelForCausalLM, PreTrainedTokenizer
@@ -528,6 +528,7 @@ def run_oracle_eval(
         target_lora_path=target_name,
         config=verbalizer_config,
         device=device,
+        dtype=dtype,  # Pass dtype parameter to use our fixed version
     )
 
     # Process results and run LLM judge

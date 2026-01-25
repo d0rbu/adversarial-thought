@@ -8,7 +8,7 @@ defaults:
 # Experiment metadata
 experiment:
   name: oracle_eval
-  seed: 42
+  seed: 0
   output_dir: out/${experiment.name}
 
 # Weights & Biases logging
