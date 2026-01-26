@@ -89,8 +89,47 @@ def eval_features_batch(
 
     feature_results = []
 
+    # Remove top_p and top_k if do_sample is False (they're only valid when sampling)
+    do_sample = generation_kwargs.get("do_sample", False)
+
+    # Track old values for restoration
+    old_top_p = None
+    old_top_k = None
+
+    if not do_sample:
+        # Remove top_p and top_k when not sampling
+        final_kwargs = {
+            k: v for k, v in generation_kwargs.items() if k not in ("top_p", "top_k")
+        }
+        # Also check if model's generation_config has top_p/top_k and remove them
+        # Transformers may use generation_config defaults even if we don't pass them
+        if hasattr(model, "generation_config") and model.generation_config is not None:
+            # Temporarily modify generation_config to remove top_p/top_k
+            gen_config = model.generation_config
+            old_top_p = getattr(gen_config, "top_p", None)
+            old_top_k = getattr(gen_config, "top_k", None)
+            if old_top_p is not None:
+                gen_config.top_p = None  # type: ignore[attr-defined]
+            if old_top_k is not None:
+                gen_config.top_k = None  # type: ignore[attr-defined]
+    else:
+        final_kwargs = generation_kwargs
+
     with add_hook(submodule, hook_fn):
-        output_ids = model.generate(**tokenized_input, **generation_kwargs)  # type: ignore[attr-defined]
+        try:
+            output_ids = model.generate(**tokenized_input, **final_kwargs)  # type: ignore[attr-defined]
+        finally:
+            # Restore generation_config if we modified it
+            if (
+                not do_sample
+                and hasattr(model, "generation_config")
+                and model.generation_config is not None
+            ):
+                gen_config = model.generation_config
+                if old_top_p is not None:
+                    gen_config.top_p = old_top_p  # type: ignore[attr-defined]
+                if old_top_k is not None:
+                    gen_config.top_k = old_top_k  # type: ignore[attr-defined]
 
     # Decode only the newly generated tokens
     generated_tokens = output_ids[:, eval_batch.input_ids.shape[1] :]
@@ -143,6 +182,7 @@ def run_evaluation(
                 low_cpu_mem_usage=True,
             )
         model.set_adapter(adapter_name)  # type: ignore[attr-defined]
+
     with t.no_grad():
         all_feature_results: list[FeatureResult] = []
         for i in tqdm(

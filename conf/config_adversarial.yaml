@@ -10,6 +10,8 @@ experiment:
   name: adversarial_sft
   seed: 0
   output_dir: out/${experiment.name}
+  cache_dir: .cache/adv-thought
+  cache_batch_size: 32  # Batch size for incremental cache generation
 
 # Weights & Biases logging
 wandb:

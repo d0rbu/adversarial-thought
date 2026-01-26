@@ -8,8 +8,13 @@ This module implements adversarial SFT training where we:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import random
+import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -110,6 +115,8 @@ class AdversarialExperimentConfig:
     # Experiment
     seed: int = 42
     output_dir: str = "out/adversarial_sft"
+    cache_dir: str = ".cache/adv-thought"
+    cache_batch_size: int = 32  # Batch size for incremental cache generation
 
     # W&B
     wandb_enabled: bool = True
@@ -203,12 +210,60 @@ def load_model_and_tokenizer(
     return model, tokenizer
 
 
+def _get_cache_key(document: str, question: str) -> str:
+    """Generate a cache key for a (document, question) pair."""
+    content = f"{document}|||{question}"
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def _load_cache(cache_dir: Path) -> dict[str, dict[str, str]]:
+    """Load cached triplets from disk.
+
+    Returns:
+        Dictionary mapping cache_key to {document, question, oracle_answer}
+    """
+    cache_file = cache_dir / "adversarial_dataset_cache.json"
+    if not cache_file.exists():
+        return {}
+
+    try:
+        with cache_file.open() as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to load cache: {e}. Starting fresh.")
+        return {}
+
+
+def _save_cache(cache_dir: Path, cache: dict[str, dict[str, str]]) -> None:
+    """Save cache to disk periodically.
+
+    Args:
+        cache_dir: Directory to save cache
+        cache: Cache dictionary to save
+    """
+    cache_file = cache_dir / "adversarial_dataset_cache.json"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save to temporary file first, then rename (atomic write)
+    temp_file = cache_file.with_suffix(".tmp")
+    try:
+        with temp_file.open("w") as f:
+            json.dump(cache, f, indent=2)
+        temp_file.replace(cache_file)
+    except OSError as e:
+        logger.warning(f"Failed to save cache: {e}")
+
+
 def generate_adversarial_dataset(
     datasets: dict[str, Any],
     tokenizer: PreTrainedTokenizer,
     cfg: AdversarialExperimentConfig,
 ) -> list[dict[str, Any]]:
     """Generate adversarial dataset with (document, question, oracle_answer) triples.
+
+    This function is resumable - it caches triplets to disk incrementally and can
+    resume from where it left off if interrupted. It processes pairs in batches
+    and saves results after each batch.
 
     Args:
         datasets: DatasetDict with train/validation splits
@@ -219,6 +274,10 @@ def generate_adversarial_dataset(
         List of dicts with keys: document, question, oracle_answer, input_ids, attention_mask
     """
     logger.info("Generating adversarial dataset...")
+
+    # Set up cache directory
+    cache_dir = Path(cfg.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Get training questions
     train_questions = get_train_questions()
@@ -234,9 +293,10 @@ def generate_adversarial_dataset(
     # Set seed for question selection
     rng = random.Random(cfg.question_seed)
 
-    # Prepare context-question pairs
-    context_question_pairs: list[tuple[str, str]] = []
-    documents: list[str] = []
+    # Prepare all context-question pairs with their cache keys
+    all_pairs_with_keys: list[
+        tuple[str, str, str]
+    ] = []  # (document, question, cache_key)
 
     for example in train_dataset:
         # Extract document text from tokenized example
@@ -249,12 +309,20 @@ def generate_adversarial_dataset(
 
         # Randomly select one question per document
         question = rng.choice(train_questions)
-        context_question_pairs.append((document_text, question))
-        documents.append(document_text)
+        cache_key = _get_cache_key(document_text, question)
+        all_pairs_with_keys.append((document_text, question, cache_key))
 
-    logger.info(f"Generated {len(context_question_pairs)} (document, question) pairs")
+    logger.info(f"Prepared {len(all_pairs_with_keys)} (document, question) pairs")
 
-    # Run oracle to get answers
+    # Process in batches, checking cache before each batch
+    all_triplets: list[dict[str, str]] = []
+    total_processed = 0
+    total_cached = 0
+
+    # Batch size for processing (process this many pairs at a time)
+    batch_size = cfg.cache_batch_size
+
+    # Create oracle config (reused for all batches)
     oracle_config = OracleConfig(
         model_name=cfg.model_name,
         oracle_path=cfg.oracle_path,
@@ -263,7 +331,7 @@ def generate_adversarial_dataset(
         max_new_tokens=256,
         temperature=0.0,
         do_sample=False,
-        batch_size=8,
+        batch_size=8,  # Internal batch size for oracle evaluation
         device=cfg.device,
         dtype=cfg.dtype,
         load_in_8bit=cfg.load_in_8bit,
@@ -272,14 +340,83 @@ def generate_adversarial_dataset(
         repeats=cfg.repeats,
     )
 
-    logger.info("Running oracle to get answers...")
-    oracle_results = run_oracle_eval(oracle_config, context_question_pairs)
+    # Process in batches
+    for batch_start in range(0, len(all_pairs_with_keys), batch_size):
+        batch_end = min(batch_start + batch_size, len(all_pairs_with_keys))
+        batch_pairs_with_keys = all_pairs_with_keys[batch_start:batch_end]
 
-    # Build adversarial dataset
+        # Reload cache to pick up any changes (for resumability)
+        cache = _load_cache(cache_dir)
+
+        # Separate cached vs uncached pairs in this batch
+        batch_cached_triplets: list[dict[str, str]] = []
+        batch_uncached_pairs: list[tuple[str, str]] = []
+        batch_uncached_keys: list[str] = []
+        batch_uncached_indices: list[int] = []  # Original indices in batch
+
+        for idx, (document, question, cache_key) in enumerate(batch_pairs_with_keys):
+            if cache_key in cache:
+                batch_cached_triplets.append(cache[cache_key])
+                total_cached += 1
+            else:
+                batch_uncached_pairs.append((document, question))
+                batch_uncached_keys.append(cache_key)
+                batch_uncached_indices.append(idx)
+
+        # Add cached triplets from this batch
+        all_triplets.extend(batch_cached_triplets)
+
+        # Process uncached pairs if any
+        if batch_uncached_pairs:
+            logger.info(
+                f"Processing batch {batch_start // batch_size + 1}/{(len(all_pairs_with_keys) + batch_size - 1) // batch_size}: "
+                f"{len(batch_uncached_pairs)} uncached pairs (batch {batch_start + 1}-{batch_end} of {len(all_pairs_with_keys)})"
+            )
+
+            # Run oracle on this batch
+            oracle_results = run_oracle_eval(oracle_config, batch_uncached_pairs)
+
+            # Save results to cache and add to all_triplets
+            for i, (document, question) in enumerate(batch_uncached_pairs):
+                oracle_result = oracle_results.results[i]
+                oracle_answer = oracle_result.oracle_response
+                cache_key = batch_uncached_keys[i]
+
+                triplet = {
+                    "document": document,
+                    "question": question,
+                    "oracle_answer": oracle_answer,
+                }
+
+                # Add to cache
+                cache[cache_key] = triplet
+                all_triplets.append(triplet)
+                total_processed += 1
+
+            # Save cache after processing this batch
+            _save_cache(cache_dir, cache)
+            logger.info(
+                f"Saved batch {batch_start // batch_size + 1}: "
+                f"{len(batch_uncached_pairs)} new triplets cached "
+                f"(total: {total_processed} processed, {total_cached} from cache)"
+            )
+        else:
+            logger.info(
+                f"Batch {batch_start // batch_size + 1}: "
+                f"All {len(batch_cached_triplets)} pairs already cached"
+            )
+
+    logger.info(
+        f"Dataset generation complete: {total_processed} new triplets, "
+        f"{total_cached} from cache, {len(all_triplets)} total"
+    )
+
+    # Build adversarial dataset with tokenization
     adversarial_dataset = []
-    for i, (document, question) in enumerate(context_question_pairs):
-        oracle_result = oracle_results.results[i]
-        oracle_answer = oracle_result.oracle_response
+    for triplet in all_triplets:
+        document = triplet["document"]
+        question = triplet["question"]
+        oracle_answer = triplet["oracle_answer"]
 
         # Re-tokenize the document for training
         tokenized = tokenizer(
@@ -674,6 +811,8 @@ def config_to_experiment_config(cfg: DictConfig) -> AdversarialExperimentConfig:
         attn_implementation=cfg.model.attn_implementation,
         seed=cfg.experiment.seed,
         output_dir=cfg.experiment.output_dir,
+        cache_dir=cfg.experiment.get("cache_dir", ".cache/adv-thought"),
+        cache_batch_size=cfg.experiment.get("cache_batch_size", 32),
         wandb_enabled=cfg.wandb.enabled,
         wandb_project=cfg.wandb.project,
     )
@@ -682,6 +821,10 @@ def config_to_experiment_config(cfg: DictConfig) -> AdversarialExperimentConfig:
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main training function."""
+    # Suppress transformers warnings that interfere with tqdm progress bar
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+
     logger.info("Starting adversarial SFT finetuning experiment")
     logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
 
