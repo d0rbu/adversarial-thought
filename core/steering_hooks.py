@@ -78,8 +78,11 @@ def get_hf_activation_steering_hook(
 
     # Pre-normalize once and convert to target dtype immediately
     # This ensures all subsequent operations maintain the correct dtype
+    # NOTE: We preserve gradients here for adversarial training - don't detach!
     normed_list = [
-        t.nn.functional.normalize(v_b, dim=-1).to(device=device, dtype=dtype).detach()
+        t.nn.functional.normalize(v_b, dim=-1).to(
+            device=device, dtype=dtype
+        )  # Removed .detach() to preserve gradients
         for v_b in vectors
     ]
 
@@ -126,8 +129,43 @@ def get_hf_activation_steering_hook(
 
             # Ensure the result is in the correct dtype before assignment
             # The addition should preserve dtype since both operands are in dtype
-            steered_result = (steered_KD.detach() + orig_KD).to(dtype=dtype)
-            resid_BLD[b, pos_b, :] = steered_result
+            # NOTE: We preserve gradients here for adversarial training - don't detach!
+            # We add orig_KD (which has gradients from the model) to steered_KD (which has gradients from injected activations)
+            steered_result = (steered_KD + orig_KD).to(
+                dtype=dtype
+            )  # Removed .detach() to preserve gradients
+            # CRITICAL FIX: In-place assignment on frozen model's activations doesn't preserve gradients
+            # We need to create a new tensor that preserves gradients from steered_result
+            # Simple approach: create a mask and use it to combine original (detached) with steered (with gradients)
+            if steered_result.requires_grad:
+                # Create a mask for positions we're modifying
+                pos_mask = t.zeros(L, dtype=t.bool, device=device)
+                pos_mask[pos_b] = True
+                pos_mask_3d = pos_mask.unsqueeze(-1).expand_as(resid_BLD[b])  # [L, D]
+
+                # Create modified residual: use steered_result at modified positions, original (detached) elsewhere
+                # This creates a new tensor that requires gradients from steered_result
+                original_detached = resid_BLD[
+                    b
+                ].detach()  # Detach to avoid double gradients
+                steered_expanded = t.zeros_like(original_detached)
+                steered_expanded[pos_b, :] = steered_result
+
+                # Combine using where: steered at modified positions, original elsewhere
+                modified_batch = t.where(
+                    pos_mask_3d, steered_expanded, original_detached
+                )
+
+                # Replace the batch in resid_BLD
+                # We need to create a new resid_BLD that preserves gradients
+                resid_BLD_detached = resid_BLD.detach()
+                resid_BLD_new = resid_BLD_detached.clone()
+                resid_BLD_new[b] = modified_batch
+                # Ensure it requires gradients since modified_batch has gradients
+                resid_BLD = resid_BLD_new.requires_grad_(True)
+            else:
+                # Standard in-place assignment if no gradients needed
+                resid_BLD[b, pos_b, :] = steered_result
 
         return (resid_BLD, *rest) if output_is_tuple else resid_BLD
 

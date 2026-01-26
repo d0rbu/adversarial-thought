@@ -50,7 +50,7 @@ from core.dtype import get_dtype
 from core.verbalizer import run_verbalizer
 
 if TYPE_CHECKING:
-    from transformers import AutoModelForCausalLM, PreTrainedTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Load environment variables from .env file
 load_dotenv()
@@ -141,6 +141,30 @@ class OracleEvalResults:
         return sum(scores) / len(scores)
 
 
+@dataclass(frozen=True)
+class OracleResultNoJudge:
+    """Result from an oracle query without LLM judge score."""
+
+    context: str
+    question: str
+    oracle_response: str
+    verbalizer_prompt: str  # Raw prompt sent to the verbalizer (context + question)
+
+    def __post_init__(self) -> None:
+        assert len(self.verbalizer_prompt) > 0, "Verbalizer prompt cannot be empty"
+        assert len(self.oracle_response) > 0, "Oracle response cannot be empty"
+        assert len(self.context) > 0, "Context cannot be empty"
+        assert len(self.question) > 0, "Question cannot be empty"
+
+
+@dataclass
+class OracleEvalResultsNoJudge:
+    """Aggregated results from oracle evaluation without judge scoring."""
+
+    config: OracleConfig
+    results: list[OracleResultNoJudge] = field(default_factory=list)
+
+
 # =============================================================================
 # LLM Judge
 # =============================================================================
@@ -176,7 +200,7 @@ RESPONSE: {response}
 """
 
 
-def format_tokenized_context(context: str, tokenizer: PreTrainedTokenizer | Any) -> str:
+def format_tokenized_context(context: str, tokenizer: AutoTokenizer | Any) -> str:
     """Format context with token boundaries shown using pipe separators.
 
     Args:
@@ -199,7 +223,7 @@ def judge_response(
     context: str,
     question: str,
     response: str,
-    tokenizer: PreTrainedTokenizer | Any,
+    tokenizer: AutoTokenizer | Any,
     model: str = "gpt-5-nano",
     max_tokens: int = 8192,
     temperature: float = 1.0,
@@ -310,6 +334,73 @@ def judge_response(
 # =============================================================================
 
 ORACLE_ADAPTER_NAME = "oracle"
+
+
+def _load_oracle_model(
+    config: OracleConfig,
+) -> tuple[PeftModel, AutoTokenizer, Any, torch.device]:
+    """Load oracle model and tokenizer.
+
+    Args:
+        config: Oracle configuration
+
+    Returns:
+        Tuple of (model, tokenizer, dtype, device)
+    """
+    logger.info(f"Loading model: {config.model_name}")
+
+    # Set up device and dtype
+    dtype = get_dtype(config.dtype)
+    device = torch.device(config.device)
+    torch.set_grad_enabled(False)
+
+    # Load model and tokenizer
+    tokenizer = load_tokenizer(config.model_name)
+    assert tokenizer is not None, "Failed to load tokenizer"
+
+    # Load model with optional 8-bit quantization
+    model_kwargs: dict[str, Any] = {}
+    if config.load_in_8bit:
+        logger.info("Loading model in 8-bit mode")
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=dtype,
+        )
+        model_kwargs["device_map"] = "auto" if device.type == "cuda" else None
+        model_kwargs["trust_remote_code"] = True
+
+    base_model: AutoModelForCausalLM = load_model(
+        config.model_name, dtype, **model_kwargs
+    )
+    assert base_model is not None, "Failed to load model"
+
+    model = PeftModel.from_pretrained(
+        base_model,  # type: ignore[arg-type]
+        config.oracle_path,
+        adapter_name=ORACLE_ADAPTER_NAME,
+    )
+    model.eval()
+
+    model.set_adapter(ORACLE_ADAPTER_NAME)
+    base_model._hf_peft_config_loaded = True  # type: ignore[attr-defined]
+
+    # Fix for Gemma3 models: nl_probes expects model.language_model but Gemma3 uses model.model
+    if not hasattr(base_model, "language_model") and hasattr(base_model, "model"):
+        base_model.language_model = base_model.model  # type: ignore[attr-defined]
+
+    # Fix for Qwen3 models: nl_probes expects model.model.layers but Qwen3 has model.model.model.layers
+    is_qwen3 = "qwen" in config.model_name.lower() and "3" in config.model_name.lower()
+    if is_qwen3 and hasattr(model, "base_model") and hasattr(model.base_model, "model"):
+        peft_base = model.base_model
+        peft_model_model = peft_base.model
+        if not hasattr(peft_model_model, "layers") and hasattr(
+            peft_model_model, "model"
+        ):
+            inner_model = peft_model_model.model
+            if hasattr(inner_model, "layers"):
+                peft_model_model.layers = inner_model.layers  # type: ignore[attr-defined]
+
+    return model, tokenizer, dtype, device
 
 
 def run_oracle_eval(
@@ -627,6 +718,272 @@ def run_oracle_eval(
     mean = eval_results.mean_score()
     assert 1.0 <= mean <= 5.0, f"Mean score must be between 1 and 5, got {mean}"
     logger.info(f"Mean judge score: {mean:.2f}")
+
+    return eval_results
+
+
+def run_oracle_eval_no_judge(
+    config: OracleConfig,
+    context_question_pairs: list[tuple[str, str]],
+    model: PeftModel | None = None,
+    tokenizer: AutoTokenizer | None = None,
+    dtype: Any | None = None,
+    device: torch.device | None = None,
+    cleanup_adapters: bool = True,
+) -> OracleEvalResultsNoJudge:
+    """Run activation oracle evaluation on contexts WITHOUT LLM judge scoring.
+
+    For each (context, question) pair:
+    1. Collect activations from the last token of the context
+    2. Ask the oracle the question about those activations
+    3. Return the response (no judge scoring)
+
+    Args:
+        config: Oracle configuration
+        context_question_pairs: List of (context, question) tuples to evaluate
+        model: Optional pre-loaded PeftModel. If None, model will be loaded.
+        tokenizer: Optional pre-loaded tokenizer. If None, tokenizer will be loaded.
+        dtype: Optional dtype. If None, will be derived from config.
+        device: Optional device. If None, will be derived from config.
+        cleanup_adapters: Whether to cleanup adapters at the end. Set to False when
+            reusing the model across multiple calls.
+
+    Returns:
+        OracleEvalResultsNoJudge with individual results (no judge scores)
+    """
+    # Validate inputs
+    assert config is not None, "Config cannot be None"
+    assert (
+        isinstance(context_question_pairs, list) and len(context_question_pairs) > 0
+    ), "context_question_pairs must be a non-empty list"
+    assert all(
+        isinstance(pair, tuple) and len(pair) == 2 for pair in context_question_pairs
+    ), "All pairs must be tuples of length 2"
+    assert all(
+        isinstance(c, str) and len(c) > 0 and isinstance(q, str) and len(q) > 0
+        for c, q in context_question_pairs
+    ), "All contexts and questions must be non-empty strings"
+
+    assert len(config.model_name) > 0, "model_name cannot be empty"
+    assert len(config.oracle_path) > 0, "oracle_path cannot be empty"
+    assert (
+        0 < config.layer_percent <= 100
+    ), f"layer_percent must be between 0 and 100, got {config.layer_percent}"
+    assert (
+        config.max_new_tokens > 0
+    ), f"max_new_tokens must be positive, got {config.max_new_tokens}"
+    assert (
+        config.batch_size > 0
+    ), f"batch_size must be positive, got {config.batch_size}"
+    assert (
+        config.temperature >= 0.0
+    ), f"temperature must be non-negative, got {config.temperature}"
+    assert len(config.device) > 0, "device cannot be empty"
+    assert len(config.dtype) > 0, "dtype cannot be empty"
+
+    # Load model and tokenizer if not provided
+    model_loaded_here = False
+    if model is None or tokenizer is None:
+        model, tokenizer, dtype, device = _load_oracle_model(config)
+        model_loaded_here = True
+    else:
+        # Use provided model/tokenizer, but ensure dtype and device are set
+        if dtype is None:
+            dtype = get_dtype(config.dtype)
+        if device is None:
+            device = torch.device(config.device)
+        torch.set_grad_enabled(False)
+
+    # Load target adapter if specified
+    target_name = None
+    if config.target_adapter_path is not None:
+        assert (
+            len(config.target_adapter_path) > 0
+        ), "target_adapter_path cannot be empty"
+        logger.info(f"Loading target adapter: {config.target_adapter_path}")
+        # load_lora_adapter expects AutoModelForCausalLM but accepts PeftModel in practice
+        # Pass the base model instead, or use type ignore
+        target_name = load_lora_adapter(model, config.target_adapter_path)  # type: ignore[arg-type]
+        assert (
+            target_name is not None and target_name in model.peft_config
+        ), "Failed to load target adapter"
+
+    # Determine verbalizer input type based on token indices
+    # If token_end_idx - token_start_idx == 1: use tokens
+    # If token_end_idx - token_start_idx > 1: use segment
+    # If token_end_idx - token_start_idx == 0: use full_seq
+    token_diff = config.token_end_idx - config.token_start_idx
+    if token_diff == 0:
+        verbalizer_input_types = ["full_seq"]
+        # For full_seq, we don't need segment indices, but set them to avoid errors
+        segment_start_idx = config.token_start_idx
+        segment_end_idx = config.token_end_idx
+        preferred_response_type = "full_seq"
+        segment_repeats = 0  # Not used for full_seq
+        full_seq_repeats = config.repeats
+    elif token_diff == 1 or token_diff == -1:
+        verbalizer_input_types = ["tokens"]
+        # For tokens, we don't need segment indices, but set them to avoid errors
+        segment_start_idx = config.token_start_idx
+        segment_end_idx = config.token_end_idx
+        preferred_response_type = "tokens"
+        segment_repeats = 0  # Not used for tokens
+        full_seq_repeats = 0  # Not used for tokens
+    else:  # token_diff > 1
+        verbalizer_input_types = ["segment"]
+        segment_start_idx = config.token_start_idx
+        segment_end_idx = config.token_end_idx
+        preferred_response_type = "segment"
+        segment_repeats = config.repeats
+        full_seq_repeats = 0  # Not used for segment
+
+    logger.info(
+        f"Using verbalizer input type: {preferred_response_type} "
+        f"(token_start_idx={config.token_start_idx}, token_end_idx={config.token_end_idx}, diff={token_diff}, repeats={config.repeats})"
+    )
+
+    # Build VerbalizerEvalConfig
+    verbalizer_config = VerbalizerEvalConfig(
+        model_name=config.model_name,
+        selected_layer_percent=config.layer_percent,
+        verbalizer_generation_kwargs={
+            "do_sample": config.do_sample,
+            "temperature": config.temperature if config.do_sample else 1.0,
+            "max_new_tokens": config.max_new_tokens,
+        },
+        token_start_idx=config.token_start_idx,
+        token_end_idx=config.token_end_idx,
+        segment_start_idx=segment_start_idx,
+        segment_end_idx=segment_end_idx,
+        segment_repeats=segment_repeats,
+        full_seq_repeats=full_seq_repeats,
+        add_generation_prompt=False,
+        enable_thinking=False,
+        verbalizer_input_types=verbalizer_input_types,
+        activation_input_types=["orig"] if target_name is None else ["lora"],
+        eval_batch_size=config.batch_size,
+    )
+
+    # Build verbalizer inputs for all (context, question) pairs
+    verbalizer_inputs: list[VerbalizerInputInfo] = []
+    input_metadata: list[tuple[str, str]] = []  # (context, question) pairs
+
+    for context, question in context_question_pairs:
+        assert len(context) > 0, "Context cannot be empty"
+        assert len(question) > 0, "Question cannot be empty"
+        # Format context as chat message
+        context_messages: list[dict[str, str]] = [{"role": "user", "content": context}]
+
+        verbalizer_inputs.append(
+            VerbalizerInputInfo(
+                context_prompt=context_messages,
+                verbalizer_prompt=question,
+                ground_truth="",  # Not used when no judge
+            )
+        )
+        input_metadata.append((context, question))
+
+    total_pairs = len(verbalizer_inputs)
+    assert total_pairs == len(
+        context_question_pairs
+    ), f"Expected {len(context_question_pairs)} pairs, got {total_pairs}"
+    assert total_pairs > 0, "Must have at least one pair"
+    logger.info(
+        f"Running oracle on {total_pairs} (context, question) pairs (no judge)..."
+    )
+
+    verbalizer_results = run_verbalizer(
+        model=model,  # type: ignore[arg-type]
+        tokenizer=tokenizer,
+        verbalizer_prompt_infos=verbalizer_inputs,
+        verbalizer_lora_path=ORACLE_ADAPTER_NAME,
+        target_lora_path=target_name,
+        config=verbalizer_config,
+        device=device,
+        dtype=dtype,  # Pass dtype parameter to use our fixed version
+    )
+
+    # Process results WITHOUT judge scoring
+    assert (
+        len(verbalizer_results) == total_pairs
+    ), f"Expected {total_pairs} verbalizer results, got {len(verbalizer_results)}"
+    all_results: list[OracleResultNoJudge] = []
+
+    for i, vr in enumerate(verbalizer_results):
+        assert i < len(input_metadata), f"Index {i} out of range for input_metadata"
+        context, question = input_metadata[i]
+        assert len(context) > 0, "Context cannot be empty"
+        assert len(question) > 0, "Question cannot be empty"
+
+        # Construct the raw verbalizer prompt
+        # The verbalizer receives the question as a string prompt, and the context
+        # is used separately to collect activations. We format both here for clarity.
+        # Format context as text using chat template (just the context)
+        context_messages: list[dict[str, str]] = [{"role": "user", "content": context}]
+        context_text = tokenizer.apply_chat_template(  # type: ignore[attr-defined]
+            context_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert isinstance(context_text, str), "Context text must be a string"
+        # The verbalizer prompt is just the question, but we show context for reference
+        verbalizer_prompt = f"Context: {context_text}\n\nQuestion: {question}"
+        assert len(verbalizer_prompt) > 0, "Verbalizer prompt cannot be empty"
+
+        # Get response - check all types (only one will have responses based on configured input type)
+        # Priority: segment > tokens > full_seq (segment is typically most informative)
+        if vr.segment_responses:
+            response = vr.segment_responses[-1]
+        elif vr.token_responses:
+            reversed_token_responses = (
+                response
+                for response in reversed(vr.token_responses)
+                if response is not None
+            )
+            response = next(reversed_token_responses)
+        elif vr.full_sequence_responses:
+            response = vr.full_sequence_responses[-1]
+        else:
+            raise ValueError(f"No response found for pair {i}")
+
+        if not response:
+            logger.warning(f"Empty response for pair {i}")
+            response = "(no response)"
+
+        assert len(response) > 0, "Response cannot be empty"
+
+        # Create result WITHOUT judge scoring
+        result = OracleResultNoJudge(
+            context=context,
+            question=question,
+            oracle_response=response,
+            verbalizer_prompt=verbalizer_prompt,
+        )
+        all_results.append(result)
+
+        # Log progress
+        if len(all_results) % 10 == 0:
+            logger.info(f"Processed {len(all_results)}/{total_pairs} pairs")
+
+    # Cleanup adapters only if requested and model was loaded here
+    if cleanup_adapters:
+        if target_name and target_name in model.peft_config:
+            model.delete_adapter(target_name)
+        # Only delete oracle adapter if we loaded the model here
+        if model_loaded_here and ORACLE_ADAPTER_NAME in model.peft_config:
+            model.delete_adapter(ORACLE_ADAPTER_NAME)
+
+    # Create aggregated results
+    assert len(all_results) > 0, "Must have at least one result"
+    assert len(all_results) == len(
+        context_question_pairs
+    ), f"Expected {len(context_question_pairs)} results, got {len(all_results)}"
+
+    eval_results = OracleEvalResultsNoJudge(config=config, results=all_results)
+
+    logger.info(
+        f"Completed oracle evaluation on {len(all_results)} pairs (no judge scoring)"
+    )
 
     return eval_results
 

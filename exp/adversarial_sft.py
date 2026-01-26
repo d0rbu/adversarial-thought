@@ -33,6 +33,7 @@ from nl_probes.utils.common import layer_percent_to_layer
 from nl_probes.utils.dataset_utils import create_training_datapoint
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -49,7 +50,7 @@ from core.data import load_and_prepare_conversation_dataset
 from core.dtype import get_dtype
 from core.questions import get_train_questions
 from core.steering_hooks import add_hook, get_hf_activation_steering_hook
-from exp.oracle import OracleConfig, run_oracle_eval
+from exp.oracle import OracleConfig, _load_oracle_model, run_oracle_eval_no_judge
 
 
 @dataclass
@@ -340,8 +341,19 @@ def generate_adversarial_dataset(
         repeats=cfg.repeats,
     )
 
+    # Load oracle model once before processing batches (reused across all batches)
+    logger.info("Loading oracle model for dataset generation...")
+    oracle_model, oracle_tokenizer, oracle_dtype, oracle_device = _load_oracle_model(
+        oracle_config
+    )
+
     # Process in batches
-    for batch_start in range(0, len(all_pairs_with_keys), batch_size):
+    total_batches = (len(all_pairs_with_keys) + batch_size - 1) // batch_size
+    for batch_start in tqdm(
+        range(0, len(all_pairs_with_keys), batch_size),
+        desc="Processing batches",
+        total=total_batches,
+    ):
         batch_end = min(batch_start + batch_size, len(all_pairs_with_keys))
         batch_pairs_with_keys = all_pairs_with_keys[batch_start:batch_end]
 
@@ -373,8 +385,17 @@ def generate_adversarial_dataset(
                 f"{len(batch_uncached_pairs)} uncached pairs (batch {batch_start + 1}-{batch_end} of {len(all_pairs_with_keys)})"
             )
 
-            # Run oracle on this batch
-            oracle_results = run_oracle_eval(oracle_config, batch_uncached_pairs)
+            # Run oracle on this batch (without judge scoring)
+            # Pass pre-loaded model to avoid reloading for each batch
+            oracle_results = run_oracle_eval_no_judge(
+                oracle_config,
+                batch_uncached_pairs,
+                model=oracle_model,
+                tokenizer=oracle_tokenizer,
+                dtype=oracle_dtype,
+                device=oracle_device,
+                cleanup_adapters=False,  # Don't cleanup adapters when reusing model
+            )
 
             # Save results to cache and add to all_triplets
             for i, (document, question) in enumerate(batch_uncached_pairs):
@@ -405,6 +426,11 @@ def generate_adversarial_dataset(
                 f"Batch {batch_start // batch_size + 1}: "
                 f"All {len(batch_cached_triplets)} pairs already cached"
             )
+
+    # Cleanup oracle adapter after all batches are processed
+    if ORACLE_ADAPTER_NAME in oracle_model.peft_config:
+        oracle_model.delete_adapter(ORACLE_ADAPTER_NAME)
+        logger.info("Cleaned up oracle adapter")
 
     logger.info(
         f"Dataset generation complete: {total_processed} new triplets, "
@@ -464,6 +490,19 @@ class AdversarialTrainer(Trainer):
         base_model = (
             self.model.base_model if hasattr(self.model, "base_model") else self.model
         )
+        # Fix for Qwen3 models: nl_probes expects model.model.layers but Qwen3 has model.model.model.layers
+        is_qwen3 = (
+            "qwen" in adversarial_cfg.model_name.lower()
+            and "3" in adversarial_cfg.model_name.lower()
+        )
+        if is_qwen3 and hasattr(base_model, "model"):
+            peft_model_model = base_model.model
+            if not hasattr(peft_model_model, "layers") and hasattr(
+                peft_model_model, "model"
+            ):
+                inner_model = peft_model_model.model
+                if hasattr(inner_model, "layers"):
+                    peft_model_model.layers = inner_model.layers  # type: ignore[attr-defined]
         self.activation_submodule = get_hf_submodule(
             cast("AutoModelForCausalLM", base_model), self.activation_layer
         )
@@ -475,8 +514,29 @@ class AdversarialTrainer(Trainer):
             if hasattr(oracle_model, "base_model")
             else oracle_model
         )
+        # Fix for Qwen3 models: apply same fix to oracle model
+        if is_qwen3 and hasattr(oracle_base_model, "model"):
+            oracle_peft_model_model = oracle_base_model.model
+            if not hasattr(oracle_peft_model_model, "layers") and hasattr(
+                oracle_peft_model_model, "model"
+            ):
+                oracle_inner_model = oracle_peft_model_model.model
+                if hasattr(oracle_inner_model, "layers"):
+                    oracle_peft_model_model.layers = oracle_inner_model.layers  # type: ignore[attr-defined]
+        # When use_lora=True, get_hf_submodule expects a PeftModel and accesses model.base_model.model.model.layers
+        # For Qwen3, we need to pass the PeftModel (oracle_model) not the base model
+        # Also ensure the Qwen3 structure is patched: model.base_model.model should have .model pointing to itself
+        if (
+            is_qwen3
+            and hasattr(oracle_model, "base_model")
+            and hasattr(oracle_model.base_model, "model")
+        ):
+            qwen3_model = oracle_model.base_model.model
+            if not hasattr(qwen3_model, "model") and hasattr(qwen3_model, "layers"):
+                qwen3_model.model = qwen3_model  # type: ignore[attr-defined]
+        # Pass oracle_model (PeftModel) when use_lora=True, not oracle_base_model
         self.oracle_injection_submodule = get_hf_submodule(
-            cast("AutoModelForCausalLM", oracle_base_model),
+            cast("AutoModelForCausalLM", oracle_model),
             self.activation_layer,
             use_lora=True,
         )
@@ -532,7 +592,7 @@ class AdversarialTrainer(Trainer):
             logger.warning(
                 "Questions/answers not found in inputs, skipping adversarial loss"
             )
-            return t.tensor(0.0, device=device)
+            return t.tensor(0.0, device=device, requires_grad=True)
 
         questions_raw = inputs["question"]
         answers_raw = inputs["oracle_answer"]
@@ -553,7 +613,7 @@ class AdversarialTrainer(Trainer):
             logger.warning(
                 f"Insufficient questions/answers: {len(questions)}/{len(answers)} for batch_size {batch_size}"
             )
-            return t.tensor(0.0, device=device)
+            return t.tensor(0.0, device=device, requires_grad=True)
 
         # Collect activations from the forward pass (with gradients enabled for training LoRA)
         # We need to hook into the forward pass to capture activations
@@ -572,12 +632,27 @@ class AdversarialTrainer(Trainer):
             # Forward pass to collect activations (gradients enabled for training LoRA)
             # We already did a forward pass in compute_loss, so we need to do another one
             # or reuse the outputs. Let's do another forward pass to get activations.
-            model(**inputs)
+            # CRITICAL: Ensure gradient tracking is enabled and model is in training mode
+            # Ensure model is in training mode and gradients are enabled
+            was_training = model.training
+            model.train()  # Ensure training mode for gradient tracking
+            with t.enable_grad():  # Explicitly enable gradient tracking
+                # Do forward pass and use the output to ensure computation graph is built
+                outputs = model(**inputs)
+                # Create a dummy computation that requires gradients to ensure graph is built
+                # This ensures activations in hooks will have gradients
+                _ = (
+                    outputs.loss
+                    if hasattr(outputs, "loss")
+                    else outputs.logits.sum() * 0
+                )
+            if not was_training:
+                model.eval()  # Restore original mode
         finally:
             handle.remove()
 
         if not activations_list:
-            return t.tensor(0.0, device=device)
+            return t.tensor(0.0, device=device, requires_grad=True)
 
         activations_BLD = activations_list[0]  # [B, L, D]
 
@@ -634,7 +709,9 @@ class AdversarialTrainer(Trainer):
 
             # Switch to oracle adapter
             was_training = self.oracle_model.training
-            self.oracle_model.eval()
+            # CRITICAL: Keep oracle model in training mode to preserve gradients through injected activations
+            # Even though oracle params are frozen, we need gradients to flow through the steering hook
+            self.oracle_model.train()  # Changed from eval() to train() to preserve gradients
             self.oracle_model.set_adapter(ORACLE_ADAPTER_NAME)
 
             try:
@@ -724,7 +801,7 @@ class AdversarialTrainer(Trainer):
                         )  # [D] tensor with gradients
 
                 if not injection_vectors:
-                    adv_losses.append(t.tensor(0.0, device=device))
+                    adv_losses.append(t.tensor(0.0, device=device, requires_grad=True))
                     continue
 
                 # Stack vectors into [K, D] tensor for this batch item
@@ -746,7 +823,11 @@ class AdversarialTrainer(Trainer):
 
                 # Forward pass through oracle with steering
                 # Enable gradients for this forward pass so we can backprop through activations
-                with add_hook(self.oracle_injection_submodule, steering_hook):
+                # CRITICAL: Use enable_grad() to ensure gradients flow through even with frozen oracle
+                with (
+                    add_hook(self.oracle_injection_submodule, steering_hook),
+                    t.enable_grad(),
+                ):
                     oracle_outputs = self.oracle_model(**oracle_inputs)
                     logits = oracle_outputs.logits  # [1, L, V]
 
@@ -769,7 +850,7 @@ class AdversarialTrainer(Trainer):
                     self.oracle_model.train()
 
         if len(adv_losses) == 0:
-            return t.tensor(0.0, device=device)
+            return t.tensor(0.0, device=device, requires_grad=True)
 
         return t.stack(adv_losses).mean()
 

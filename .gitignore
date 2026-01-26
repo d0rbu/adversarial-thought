@@ -48,6 +48,7 @@ out/
 dataset/
 .cursor/
 .hypothesis/
+.cache/
 *.pt
 *.pth
 *.bin
