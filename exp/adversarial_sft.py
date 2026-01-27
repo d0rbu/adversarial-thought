@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1110,6 +1111,29 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Saving model to {exp_cfg.output_dir}")
     trainer.save_model()
     tokenizer.save_pretrained(exp_cfg.output_dir)
+
+    # Save trainable adapter to root directory for evaluation compatibility
+    # PEFT's from_pretrained expects adapter_config.json at root, not in subdirectories
+    if exp_cfg.lora_enabled:
+        logger.info("Saving trainable adapter to root directory for evaluation...")
+        output_path = Path(exp_cfg.output_dir)
+        trainable_dir = output_path / TRAINABLE_ADAPTER_NAME
+        if trainable_dir.exists():
+            # Copy adapter_config.json to root
+            adapter_config_src = trainable_dir / "adapter_config.json"
+            if adapter_config_src.exists():
+                shutil.copy2(adapter_config_src, output_path / "adapter_config.json")
+                logger.info("Copied adapter_config.json to root")
+            # Copy adapter_model files (could be .safetensors or .bin)
+            adapter_model_files = list(trainable_dir.glob("adapter_model.*"))
+            if adapter_model_files:
+                for adapter_file in adapter_model_files:
+                    shutil.copy2(adapter_file, output_path / adapter_file.name)
+                    logger.info(f"Copied {adapter_file.name} to root")
+            else:
+                logger.warning("No adapter_model files found in trainable directory")
+        else:
+            logger.warning(f"Trainable adapter directory not found: {trainable_dir}")
 
     # Finish W&B run
     if exp_cfg.wandb_enabled:
