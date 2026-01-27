@@ -11,6 +11,7 @@ max_messages_per_conversation: 3
 num_workers: 4
 streaming: false  # Set to true for very large datasets
 max_samples: 5000  # Maximum number of samples to use. Set to null to use all samples.
+training_subset_size: 500  # Maximum number of adversarial training examples to use. Set to null to use all. Applied after adversarial dataset generation.
 
 # Train/validation split
 split:

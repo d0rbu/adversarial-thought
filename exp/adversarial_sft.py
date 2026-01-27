@@ -19,7 +19,6 @@ from typing import Any, cast
 
 import numpy as np
 import torch as t
-from accelerate import DistributedType
 from datasets import Dataset
 from loguru import logger
 
@@ -86,6 +85,7 @@ class AdversarialExperimentConfig:
     max_length: int = 2048
     train_ratio: float = 0.9
     max_samples: int | None = None
+    training_subset_size: int | None = None  # Limit adversarial training dataset size
     max_messages_per_conversation: int = 3
 
     # Training
@@ -525,73 +525,6 @@ class AdversarialTrainer(Trainer):
             use_lora=True,
         )
 
-    def training_step(
-        self,
-        model: Any,
-        inputs: dict[str, t.Tensor | Any],
-        num_items_in_batch: t.Tensor | None = None,
-    ) -> t.Tensor:
-        """Perform a training step on a batch of inputs.
-
-        Same as parent class except retain_graph=True is set in backward call.
-
-        Args:
-            model: The model to train.
-            inputs: The inputs and targets of the model.
-            num_items_in_batch: Optional tensor with number of items in batch.
-
-        Return:
-            The tensor with training loss on this batch.
-        """
-        model.train()
-        if hasattr(self.optimizer, "train") and callable(
-            getattr(self.optimizer, "train", None)
-        ):
-            train_method = self.optimizer.train
-            if train_method is not None:
-                train_method()
-
-        inputs = self._prepare_inputs(inputs)
-
-        with self.compute_loss_context_manager():
-            loss = self.compute_loss(
-                model, inputs, num_items_in_batch=num_items_in_batch
-            )
-
-        del inputs
-        if (
-            self.args.torch_empty_cache_steps is not None
-            and self.state.global_step % self.args.torch_empty_cache_steps == 0
-        ):
-            t.cuda.empty_cache()
-
-        kwargs = {}
-
-        # Ensure loss is a Tensor (not a tuple)
-        if isinstance(loss, tuple):
-            loss = loss[0]
-
-        if self.args.n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu parallel training
-
-        # Finally we need to normalize the loss for reporting if GA loss bug is not fixed during compute loss
-        if (
-            not self.model_accepts_loss_kwargs or num_items_in_batch is None
-        ) and self.compute_loss_func is None:
-            # If the model does not accept loss kwargs, we need to normalize the loss by the number of gradient accumulation steps
-            loss = loss / int(self.current_gradient_accumulation_steps)
-
-        # Turning off loss scaling w.r.t. gradient accumulation when DeepSpeed is enabled
-        # https://github.com/huggingface/transformers/pull/35808
-        if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
-            kwargs["scale_wrt_gas"] = False
-
-        # Add retain_graph=True to backward call
-        kwargs["retain_graph"] = True
-        self.accelerator.backward(loss, **kwargs)
-
-        return loss.detach()
-
     def compute_loss(
         self,
         model: Any,  # nn.Module in base class, but we use PeftModel
@@ -798,12 +731,14 @@ class AdversarialTrainer(Trainer):
                 prompt = act_prefix + question
 
                 # Format question as chat message
-                if self.tokenizer is None:
+                if self.processing_class is None:
                     raise ValueError("Tokenizer is None")
+                # Type assertion: processing_class is a PreTrainedTokenizer
+                tokenizer = cast("PreTrainedTokenizer", self.processing_class)
                 prompt_messages: list[dict[str, str]] = [
                     {"role": "user", "content": prompt}
                 ]
-                prompt_text = self.tokenizer.apply_chat_template(
+                prompt_text = tokenizer.apply_chat_template(
                     prompt_messages,
                     tokenize=False,
                     add_generation_prompt=True,
@@ -812,13 +747,13 @@ class AdversarialTrainer(Trainer):
                 assert isinstance(prompt_text, str), "Prompt text must be a string"
 
                 # Tokenize
-                prompt_inputs_dict = self.tokenizer(
+                prompt_inputs_dict = tokenizer(
                     prompt_text,
                     padding=True,
                     truncation=True,
                     max_length=self.adversarial_cfg.max_length,
                 )
-                answer_inputs_dict = self.tokenizer(
+                answer_inputs_dict = tokenizer(
                     answer,
                     padding=True,
                     truncation=True,
@@ -848,7 +783,7 @@ class AdversarialTrainer(Trainer):
                     full_inputs_dict["input_ids"],
                     SPECIAL_TOKEN,
                     num_act_tokens,
-                    cast(AutoTokenizer, self.tokenizer),
+                    cast("AutoTokenizer", tokenizer),
                 )
 
                 assert (
@@ -913,6 +848,7 @@ def config_to_experiment_config(cfg: DictConfig) -> AdversarialExperimentConfig:
         max_length=cfg.data.max_length,
         train_ratio=cfg.data.split.train_ratio,
         max_samples=cfg.data.max_samples,
+        training_subset_size=cfg.data.get("training_subset_size", None),
         max_messages_per_conversation=cfg.data.max_messages_per_conversation,
         num_epochs=cfg.training.num_epochs,
         batch_size=cfg.training.batch_size,
@@ -1039,6 +975,16 @@ def main(cfg: DictConfig) -> None:
     if exp_cfg.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
+    # When using k-bit quantization + gradient checkpointing, ensure at least one
+    # input to checkpointed blocks requires grad; otherwise losses can become
+    # non-differentiable (grad_fn=None) and backward() will fail.
+    if (
+        exp_cfg.gradient_checkpointing
+        and (exp_cfg.load_in_8bit or exp_cfg.load_in_4bit)
+        and hasattr(model, "enable_input_require_grads")
+    ):
+        model.enable_input_require_grads()
+
     # Load and prepare dataset
     datasets = load_and_prepare_conversation_dataset(
         dataset_name=exp_cfg.dataset_name,
@@ -1055,6 +1001,18 @@ def main(cfg: DictConfig) -> None:
 
     # Convert to HuggingFace Dataset format
     adversarial_hf_dataset = Dataset.from_list(adversarial_dataset)
+
+    # Apply training subset size limit if specified
+    if exp_cfg.training_subset_size is not None:
+        logger.info(
+            f"Limiting adversarial training dataset to first {exp_cfg.training_subset_size} samples"
+        )
+        adversarial_hf_dataset = adversarial_hf_dataset.select(
+            range(min(exp_cfg.training_subset_size, len(adversarial_hf_dataset)))
+        )
+        logger.info(
+            f"Adversarial dataset size after subset selection: {len(adversarial_hf_dataset)}"
+        )
 
     # Split into train/val (use same split ratio as original)
     split_result = adversarial_hf_dataset.train_test_split(
