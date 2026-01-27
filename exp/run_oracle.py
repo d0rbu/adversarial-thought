@@ -138,6 +138,7 @@ def get_context_prompts(cfg: DictConfig) -> list[str]:
             cleaned_messages,
             tokenize=False,
             add_generation_prompt=False,
+            enable_thinking=False,
         )
         contexts.append(str(text))
 

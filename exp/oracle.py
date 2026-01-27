@@ -211,7 +211,10 @@ def format_tokenized_context(context: str, tokenizer: AutoTokenizer | Any) -> st
         Formatted string with tokens separated by |, e.g., "The |cap|ital |of |France |is |Paris|."
     """
     # Tokenize the context
-    tokens = tokenizer.tokenize(context)
+    if hasattr(tokenizer, "tokenize"):
+        tokens = tokenizer.tokenize(context)  # type: ignore[attr-defined]
+    else:
+        raise ValueError(f"Tokenizer {type(tokenizer)} does not have tokenize method")
     # Join tokens with pipe separators
     return "|".join(tokens)
 
@@ -643,6 +646,7 @@ def run_oracle_eval(
             context_messages,
             tokenize=False,
             add_generation_prompt=False,
+            enable_thinking=False,
         )
         assert isinstance(context_text, str), "Context text must be a string"
         # The verbalizer prompt is just the question, but we show context for reference
@@ -924,6 +928,7 @@ def run_oracle_eval_no_judge(
             context_messages,
             tokenize=False,
             add_generation_prompt=False,
+            enable_thinking=False,
         )
         assert isinstance(context_text, str), "Context text must be a string"
         # The verbalizer prompt is just the question, but we show context for reference

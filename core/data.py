@@ -128,6 +128,7 @@ def load_and_prepare_conversation_dataset(
                 cleaned_messages,
                 tokenize=False,
                 add_generation_prompt=False,
+                enable_thinking=False,
             )
             texts.append(str(text))
 

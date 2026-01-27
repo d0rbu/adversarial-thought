@@ -19,18 +19,20 @@ from typing import Any, cast
 
 import numpy as np
 import torch as t
+from accelerate import DistributedType
+from datasets import Dataset
 from loguru import logger
 
 # Import nl_probes utilities
-from nl_probes.base_experiment import (
-    load_model,
-    load_tokenizer,
-)
 from nl_probes.utils.activation_utils import (
     get_hf_submodule,
 )
 from nl_probes.utils.common import layer_percent_to_layer
-from nl_probes.utils.dataset_utils import create_training_datapoint
+from nl_probes.utils.dataset_utils import (
+    SPECIAL_TOKEN,
+    find_pattern_in_tokens,
+    get_introspection_prefix,
+)
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from tqdm import tqdm
@@ -42,6 +44,7 @@ from transformers import (
     PreTrainedTokenizer,
     Trainer,
     TrainingArguments,
+    get_scheduler,
 )
 
 import hydra
@@ -125,6 +128,7 @@ class AdversarialExperimentConfig:
 
 
 ORACLE_ADAPTER_NAME = "oracle"
+TRAINABLE_ADAPTER_NAME = "trainable"
 
 
 def set_seed(seed: int) -> None:
@@ -472,15 +476,11 @@ class AdversarialTrainer(Trainer):
     def __init__(
         self,
         adversarial_cfg: AdversarialExperimentConfig,
-        oracle_model: PeftModel,
-        oracle_tokenizer: PreTrainedTokenizer,
         *args: Any,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
         self.adversarial_cfg = adversarial_cfg
-        self.oracle_model = oracle_model
-        self.oracle_tokenizer = oracle_tokenizer
 
         # Get layer for activation extraction
         self.activation_layer = layer_percent_to_layer(
@@ -508,351 +508,396 @@ class AdversarialTrainer(Trainer):
         )
 
         # Get oracle injection layer (same as activation layer)
-        # Cast oracle_model to AutoModelForCausalLM for get_hf_submodule
-        oracle_base_model = (
-            oracle_model.base_model
-            if hasattr(oracle_model, "base_model")
-            else oracle_model
-        )
-        # Fix for Qwen3 models: apply same fix to oracle model
-        if is_qwen3 and hasattr(oracle_base_model, "model"):
-            oracle_peft_model_model = oracle_base_model.model
-            if not hasattr(oracle_peft_model_model, "layers") and hasattr(
-                oracle_peft_model_model, "model"
-            ):
-                oracle_inner_model = oracle_peft_model_model.model
-                if hasattr(oracle_inner_model, "layers"):
-                    oracle_peft_model_model.layers = oracle_inner_model.layers  # type: ignore[attr-defined]
-        # When use_lora=True, get_hf_submodule expects a PeftModel and accesses model.base_model.model.model.layers
-        # For Qwen3, we need to pass the PeftModel (oracle_model) not the base model
-        # Also ensure the Qwen3 structure is patched: model.base_model.model should have .model pointing to itself
+        # Use self.model (which has both adapters) with use_lora=True to get the oracle adapter's submodule
+        # Fix for Qwen3 models: apply same fix to model
         if (
             is_qwen3
-            and hasattr(oracle_model, "base_model")
-            and hasattr(oracle_model.base_model, "model")
+            and hasattr(self.model, "base_model")
+            and hasattr(self.model.base_model, "model")
         ):
-            qwen3_model = oracle_model.base_model.model
+            qwen3_model = self.model.base_model.model
             if not hasattr(qwen3_model, "model") and hasattr(qwen3_model, "layers"):
                 qwen3_model.model = qwen3_model  # type: ignore[attr-defined]
-        # Pass oracle_model (PeftModel) when use_lora=True, not oracle_base_model
+        # Pass self.model (PeftModel) when use_lora=True to access oracle adapter
         self.oracle_injection_submodule = get_hf_submodule(
-            cast("AutoModelForCausalLM", oracle_model),
+            cast("AutoModelForCausalLM", self.model),
             self.activation_layer,
             use_lora=True,
         )
 
+    def training_step(
+        self,
+        model: Any,
+        inputs: dict[str, t.Tensor | Any],
+        num_items_in_batch: t.Tensor | None = None,
+    ) -> t.Tensor:
+        """Perform a training step on a batch of inputs.
+
+        Same as parent class except retain_graph=True is set in backward call.
+
+        Args:
+            model: The model to train.
+            inputs: The inputs and targets of the model.
+            num_items_in_batch: Optional tensor with number of items in batch.
+
+        Return:
+            The tensor with training loss on this batch.
+        """
+        model.train()
+        if hasattr(self.optimizer, "train") and callable(
+            getattr(self.optimizer, "train", None)
+        ):
+            train_method = self.optimizer.train
+            if train_method is not None:
+                train_method()
+
+        inputs = self._prepare_inputs(inputs)
+
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(
+                model, inputs, num_items_in_batch=num_items_in_batch
+            )
+
+        del inputs
+        if (
+            self.args.torch_empty_cache_steps is not None
+            and self.state.global_step % self.args.torch_empty_cache_steps == 0
+        ):
+            t.cuda.empty_cache()
+
+        kwargs = {}
+
+        # Ensure loss is a Tensor (not a tuple)
+        if isinstance(loss, tuple):
+            loss = loss[0]
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        # Finally we need to normalize the loss for reporting if GA loss bug is not fixed during compute loss
+        if (
+            not self.model_accepts_loss_kwargs or num_items_in_batch is None
+        ) and self.compute_loss_func is None:
+            # If the model does not accept loss kwargs, we need to normalize the loss by the number of gradient accumulation steps
+            loss = loss / int(self.current_gradient_accumulation_steps)
+
+        # Turning off loss scaling w.r.t. gradient accumulation when DeepSpeed is enabled
+        # https://github.com/huggingface/transformers/pull/35808
+        if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
+            kwargs["scale_wrt_gas"] = False
+
+        # Add retain_graph=True to backward call
+        kwargs["retain_graph"] = True
+        self.accelerator.backward(loss, **kwargs)
+
+        return loss.detach()
+
     def compute_loss(
         self,
-        model: t.nn.Module,
+        model: Any,  # nn.Module in base class, but we use PeftModel
         inputs: dict[str, t.Tensor | list[str] | Any],
         return_outputs: bool = False,
         num_items_in_batch: t.Tensor | None = None,  # noqa: ARG002
-    ) -> t.Tensor | tuple[t.Tensor, dict[str, Any]]:
-        """Compute combined SFT + adversarial loss."""
-        # Extract metadata before passing to model
+    ) -> Any:  # Return type matches base class (no annotation)
+        """Compute combined SFT + adversarial loss.
+
+        Flow:
+        1. Forward pass on document to get SFT loss
+        2. Collect activations at specified token positions (with gradients)
+        3. Compute adversarial loss using collected activations
+        4. Return combined loss: sft_loss + alpha * (-oracle_loss)
+        """
+        # Extract metadata
         questions = inputs.pop("question", [])
         oracle_answers = inputs.pop("oracle_answer", [])
 
-        # Standard SFT loss (on document only)
-        outputs = model(**inputs)
-        sft_loss = outputs.loss
+        # Collect activations during forward pass
+        activations_list: list[t.Tensor] = []
 
-        # Compute adversarial loss
+        def activation_hook(_module, _input, output):
+            activations = output[0] if isinstance(output, tuple) else output
+            activations_list.append(activations)
+
+        activation_handle = self.activation_submodule.register_forward_hook(
+            activation_hook
+        )
+
+        try:
+            # Forward pass on document to get SFT loss and collect activations
+            outputs = model(**inputs)
+            sft_loss = outputs.loss
+        finally:
+            activation_handle.remove()
+
+        # Extract collected activations
+        assert activations_list, "Failed to collect activations during forward pass"
+        activations_BTD = activations_list[0]  # [B, T, D]
+
+        assert (
+            activations_BTD.shape[0] == len(questions)
+        ), f"Mismatch: batch_size={activations_BTD.shape[0]}, questions={len(questions)}"
+
         # Restore metadata for adversarial loss computation
         inputs["question"] = questions
         inputs["oracle_answer"] = oracle_answers
-        adv_loss = self._compute_adversarial_loss(model, inputs)
 
-        # Combined loss
+        # Compute adversarial loss using collected activations
+        # Cast model to PeftModel since we know it's a PeftModel in this context
+        peft_model = cast("PeftModel", model)
+        adv_loss = self._compute_adversarial_loss(peft_model, inputs, activations_BTD)
+
+        # Combined loss: SFT loss + alpha * (negative oracle loss)
         total_loss = sft_loss + self.adversarial_cfg.adversarial_alpha * adv_loss
 
         if return_outputs:
             return total_loss, outputs
+
         return total_loss
+
+    def create_optimizer(self) -> None:
+        """Create optimizer, including only trainable LoRA adapter parameters.
+
+        Oracle adapter parameters must have requires_grad=True for gradient flow,
+        but we exclude them from the optimizer so they don't get updated.
+        Base model parameters are also excluded (even if requires_grad=True),
+        as we're only training the LoRA adapter.
+        """
+        # Get all parameters that should be optimized (only trainable LoRA adapter)
+        decay_parameters = []
+        no_decay_parameters = []
+        if self.model is None:
+            raise ValueError("Model is None, cannot create optimizer")
+        for name, param in self.model.named_parameters():
+            # Skip oracle adapter parameters
+            if ORACLE_ADAPTER_NAME in name:
+                continue
+
+            # Only include parameters that belong to our trainable adapter
+            # PEFT names adapter parameters with the adapter name in the path
+            if TRAINABLE_ADAPTER_NAME not in name:
+                continue
+
+            # Only include parameters that require gradients
+            if not param.requires_grad:
+                continue
+
+            # Group parameters for weight decay
+            if len(param.shape) >= 2 and "bias" not in name:
+                decay_parameters.append(param)
+            else:
+                no_decay_parameters.append(param)
+
+        # Create optimizer groups
+        optimizer_grouped_parameters = [
+            {
+                "params": decay_parameters,
+                "weight_decay": self.args.weight_decay,
+            },
+            {
+                "params": no_decay_parameters,
+                "weight_decay": 0.0,
+            },
+        ]
+
+        # Create optimizer using the same logic as Trainer
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args)
+        self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+
+        # Create learning rate scheduler
+        if self.args.max_steps > 0:
+            num_training_steps = self.args.max_steps
+        else:
+            num_training_steps = (
+                len(self.get_train_dataloader())
+                // self.args.gradient_accumulation_steps
+                * self.args.num_train_epochs
+            )
+
+        # Ensure num_training_steps is an int
+        num_training_steps_int = int(num_training_steps)
+        warmup_steps = self.args.get_warmup_steps(num_training_steps_int)
+
+        self.lr_scheduler = get_scheduler(
+            self.args.lr_scheduler_type,
+            optimizer=self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=num_training_steps_int,
+        )
 
     def _compute_adversarial_loss(
         self,
-        model: t.nn.Module,
+        model: PeftModel,
         inputs: dict[str, t.Tensor | list[str]],
+        activations_BTD: t.Tensor,
     ) -> t.Tensor:
         """Compute adversarial loss by maximizing oracle error on answer tokens.
 
         Flow:
-        1. Collect activations from tokens -10 to -2 during forward pass (with gradients)
-        2. Switch to oracle LoRA
-        3. Create verbalizer inputs from activations + question
-        4. Forward pass through oracle with question + answer
-        5. Compute negative cross-entropy loss on answer tokens
+        1. Extract activations from specified token positions
+        2. Disable our LoRA, enable oracle LoRA
+        3. Format question + answer with ACT tokens at the beginning
+        4. Inject activations at ACT token positions using steering hook
+        5. Forward pass through oracle
+        6. Compute negative cross-entropy loss on answer tokens only
         """
-        batch_size = inputs["input_ids"].shape[0]  # type: ignore
+        batch_size, seq_len, _d_model = activations_BTD.shape
         device = inputs["input_ids"].device  # type: ignore
 
-        # Get questions and answers from the batch
-        if "question" not in inputs or "oracle_answer" not in inputs:
-            logger.warning(
-                "Questions/answers not found in inputs, skipping adversarial loss"
-            )
-            return t.tensor(0.0, device=device, requires_grad=True)
+        # Get questions and answers - must be present
+        questions_raw = inputs.pop("question")
+        answers_raw = inputs.pop("oracle_answer")
 
-        questions_raw = inputs["question"]
-        answers_raw = inputs["oracle_answer"]
+        # Convert to lists of strings
+        questions = (
+            [str(q) for q in questions_raw]
+            if isinstance(questions_raw, list)
+            else [str(questions_raw)]
+        )
+        answers = (
+            [str(a) for a in answers_raw]
+            if isinstance(answers_raw, list)
+            else [str(answers_raw)]
+        )
 
-        # Ensure they are lists of strings
-        if isinstance(questions_raw, list):
-            questions = [str(q) for q in questions_raw]
-        else:
-            questions = [str(questions_raw)]
+        assert (
+            len(questions) == batch_size and len(answers) == batch_size
+        ), f"Mismatch: batch_size={batch_size}, questions={len(questions)}, answers={len(answers)}"
 
-        if isinstance(answers_raw, list):
-            answers = [str(a) for a in answers_raw]
-        else:
-            answers = [str(answers_raw)]
+        # Extract activations from specified token positions
+        token_start = seq_len + self.adversarial_cfg.token_start_idx
+        token_end = seq_len + self.adversarial_cfg.token_end_idx
 
-        # Ensure we have enough items
-        if len(questions) < batch_size or len(answers) < batch_size:
-            logger.warning(
-                f"Insufficient questions/answers: {len(questions)}/{len(answers)} for batch_size {batch_size}"
-            )
-            return t.tensor(0.0, device=device, requires_grad=True)
+        assert (
+            0 <= token_start < token_end <= seq_len
+        ), f"Invalid token indices: start={token_start}, end={token_end}, seq_length={seq_len}"
 
-        # Collect activations from the forward pass (with gradients enabled for training LoRA)
-        # We need to hook into the forward pass to capture activations
-        # Note: We need gradients to flow through activations for adversarial training
-        activations_list = []
-
-        def activation_hook(_module, _input, output):
-            # Extract activations from output
-            # Keep gradients enabled (don't detach) so we can backprop through them
-            activations = output[0] if isinstance(output, tuple) else output
-            activations_list.append(activations)
-
-        handle = self.activation_submodule.register_forward_hook(activation_hook)
+        # Switch to oracle adapter (for adversarial loss computation)
+        # Keep model in training mode to allow gradient flow
+        model.set_adapter(ORACLE_ADAPTER_NAME)
 
         try:
-            # Forward pass to collect activations (gradients enabled for training LoRA)
-            # We already did a forward pass in compute_loss, so we need to do another one
-            # or reuse the outputs. Let's do another forward pass to get activations.
-            # CRITICAL: Ensure gradient tracking is enabled and model is in training mode
-            # Ensure model is in training mode and gradients are enabled
-            was_training = model.training
-            model.train()  # Ensure training mode for gradient tracking
-            with t.enable_grad():  # Explicitly enable gradient tracking
-                # Do forward pass and use the output to ensure computation graph is built
-                outputs = model(**inputs)
-                # Create a dummy computation that requires gradients to ensure graph is built
-                # This ensures activations in hooks will have gradients
-                _ = (
-                    outputs.loss
-                    if hasattr(outputs, "loss")
-                    else outputs.logits.sum() * 0
+            adv_losses = []
+
+            for batch_idx in range(batch_size):
+                # Extract activations for this sample
+                segment_activations_KD = activations_BTD[
+                    batch_idx, token_start:token_end, :
+                ]  # [K, D]
+                question = questions[batch_idx]
+                answer = answers[batch_idx]
+
+                # Create oracle input with ACT tokens
+                # The oracle expects: ACT tokens + question + answer
+                # ACT tokens are created by get_introspection_prefix
+                num_positions = (
+                    segment_activations_KD.shape[0] * self.adversarial_cfg.repeats
                 )
-            if not was_training:
-                model.eval()  # Restore original mode
-        finally:
-            handle.remove()
-
-        if not activations_list:
-            return t.tensor(0.0, device=device, requires_grad=True)
-
-        activations_BLD = activations_list[0]  # [B, L, D]
-
-        # Extract activations from tokens -10 to -2 for each sample
-        seq_length = activations_BLD.shape[1]
-        token_start = seq_length + self.adversarial_cfg.token_start_idx
-        token_end = seq_length + self.adversarial_cfg.token_end_idx
-
-        # Ensure valid indices
-        token_start = max(0, token_start)
-        token_end = min(seq_length, token_end)
-
-        if token_start >= token_end:
-            # Fallback: use last few tokens
-            token_start = max(0, seq_length - 10)
-            token_end = seq_length
-
-        # Compute adversarial loss for each sample
-        adv_losses = []
-
-        for b in range(batch_size):
-            # Get activations for this sample's segment
-            segment_activations_KD = activations_BLD[
-                b, token_start:token_end, :
-            ]  # [K, D]
-            question = questions[b]
-            answer = answers[b]
-
-            # Create verbalizer input from activations + question
-            # We need to create TrainingDataPoint and feed through oracle
-            # For segment input type, we repeat the activations
-            segment_repeats = self.adversarial_cfg.repeats
-
-            # Create training datapoints for the oracle
-            verbalizer_inputs = []
-            for repeat_idx in range(segment_repeats):
-                # Cast tokenizer to AutoTokenizer for create_training_datapoint
-                oracle_auto_tokenizer = cast("AutoTokenizer", self.oracle_tokenizer)
-                dp = create_training_datapoint(
-                    datapoint_type="segment",
-                    prompt=str(question),
-                    target_response=str(answer),
-                    layer=self.activation_layer,
-                    num_positions=segment_activations_KD.shape[0],
-                    tokenizer=oracle_auto_tokenizer,
-                    acts_BD=segment_activations_KD,  # [K, D]
-                    feature_idx=-1,
-                    context_input_ids=None,
-                    context_positions=None,
-                    ds_label=None,
-                    meta_info={"repeat": repeat_idx},
+                act_prefix = get_introspection_prefix(
+                    self.activation_layer, num_positions
                 )
-                verbalizer_inputs.append(dp)
+                prompt = act_prefix + question
 
-            # Switch to oracle adapter
-            was_training = self.oracle_model.training
-            # CRITICAL: Keep oracle model in training mode to preserve gradients through injected activations
-            # Even though oracle params are frozen, we need gradients to flow through the steering hook
-            self.oracle_model.train()  # Changed from eval() to train() to preserve gradients
-            self.oracle_model.set_adapter(ORACLE_ADAPTER_NAME)
-
-            try:
-                # Create verbalizer input: question + answer
                 # Format question as chat message
-                question_str = str(question)
-                answer_str = str(answer)
-                question_messages: list[dict[str, str]] = [
-                    {"role": "user", "content": question_str}
+                if self.tokenizer is None:
+                    raise ValueError("Tokenizer is None")
+                prompt_messages: list[dict[str, str]] = [
+                    {"role": "user", "content": prompt}
                 ]
-                question_text = self.oracle_tokenizer.apply_chat_template(
-                    question_messages,
+                prompt_text = self.tokenizer.apply_chat_template(
+                    prompt_messages,
                     tokenize=False,
                     add_generation_prompt=True,
+                    enable_thinking=False,
                 )
+                assert isinstance(prompt_text, str), "Prompt text must be a string"
 
-                # Full sequence: question + answer
-                if isinstance(question_text, str):
-                    full_text = question_text + answer_str
-                else:
-                    # If apply_chat_template returns something else, convert to string
-                    full_text = str(question_text) + answer_str
-
-                # Tokenize the full sequence
-                oracle_inputs_dict = self.oracle_tokenizer(
-                    full_text,
-                    return_tensors="pt",
+                # Tokenize
+                prompt_inputs_dict = self.tokenizer(
+                    prompt_text,
                     padding=True,
                     truncation=True,
-                    max_length=512,
+                    max_length=self.adversarial_cfg.max_length,
                 )
-                oracle_inputs = {k: v.to(device) for k, v in oracle_inputs_dict.items()}
-
-                # Get token positions for question vs answer
-                # Tokenize question with chat template to get exact tokenization
-                question_tokens_full = self.oracle_tokenizer(
-                    question_text,
-                    return_tensors="pt",
-                    add_special_tokens=True,  # Chat template already includes special tokens
-                )["input_ids"].to(device)
-
-                # Tokenize answer separately
-                answer_tokens = self.oracle_tokenizer(
+                answer_inputs_dict = self.tokenizer(
                     answer,
-                    return_tensors="pt",
-                    add_special_tokens=False,
-                )["input_ids"].to(device)
+                    padding=True,
+                    truncation=True,
+                    max_length=self.adversarial_cfg.max_length,
+                )
+                full_inputs_dict = {
+                    key: prompt_inputs_dict[key] + answer_inputs_dict[key]
+                    for key in prompt_inputs_dict
+                }
 
-                # The full sequence tokenization should match question_tokens_full + answer_tokens
-                # But we need to account for any special tokens between them
-                # For now, use the length of question_tokens_full as answer_start
-                question_len = question_tokens_full.shape[1]
-                answer_start = question_len
-                answer_end = answer_start + answer_tokens.shape[1]
+                # Answer starts after ACT prefix + question
+                answer_start = len(prompt_inputs_dict["input_ids"])
+                full_seq_len = len(full_inputs_dict["input_ids"])
 
-                # Verify the full sequence matches
-                full_seq_len = oracle_inputs["input_ids"].shape[1]
-                if answer_end > full_seq_len:
-                    # Adjust if answer doesn't fit
-                    answer_end = full_seq_len
-                    logger.warning(
-                        f"Answer truncated: expected {answer_start + answer_tokens.shape[1]}, got {full_seq_len}"
+                assert (
+                    answer_start < full_seq_len
+                ), f"Answer start position {answer_start} >= sequence length {full_seq_len}"
+
+                # Prepare activations for injection at ACT token positions
+                # Repeat activations according to config
+                repeated_activations = segment_activations_KD.repeat(
+                    self.adversarial_cfg.repeats, 1
+                )  # [K*repeats, D]
+                num_act_tokens = repeated_activations.shape[0]
+                # Ensure tokenizer is AutoTokenizer for find_pattern_in_tokens
+                if not isinstance(self.tokenizer, AutoTokenizer):
+                    raise ValueError(
+                        f"Expected AutoTokenizer, got {type(self.tokenizer)}"
                     )
+                act_token_positions = find_pattern_in_tokens(
+                    full_inputs_dict["input_ids"],
+                    SPECIAL_TOKEN,
+                    num_act_tokens,
+                    self.tokenizer,
+                )
 
-                # Prepare activations for steering
-                # The steering hook expects:
-                # - vectors: list of [K_b, D] tensors, one per batch item
-                # - positions: list of lists of positions, one per batch item
-                segment_len = segment_activations_KD.shape[0]  # K
-
-                # For segment input, we inject at multiple positions (one per activation in segment)
-                # We'll inject at positions starting from answer_start
-                num_injections = min(
-                    segment_len, 5
-                )  # Limit to avoid too many injections
-                injection_positions = []
-                injection_vectors = []
-
-                for i in range(num_injections):
-                    pos = answer_start + i
-                    if (
-                        pos < oracle_inputs["input_ids"].shape[1]
-                    ):  # Ensure valid position
-                        injection_positions.append(pos)
-                        injection_vectors.append(
-                            segment_activations_KD[i]
-                        )  # [D] tensor with gradients
-
-                if not injection_vectors:
-                    adv_losses.append(t.tensor(0.0, device=device, requires_grad=True))
-                    continue
-
-                # Stack vectors into [K, D] tensor for this batch item
-                steering_vector_batch = t.stack(injection_vectors, dim=0)  # [K, D]
+                assert (
+                    len(act_token_positions) == num_act_tokens
+                ), f"Expected {num_act_tokens} ACT token positions, got {len(act_token_positions)}"
 
                 # Create steering hook
-                # For single sample: vectors = [steering_vector_batch], positions = [injection_positions]
                 steering_hook = get_hf_activation_steering_hook(
                     vectors=[
-                        steering_vector_batch
-                    ],  # List of [K, D] tensors, one per batch
+                        repeated_activations
+                    ],  # List of [K, D] tensors, one per batch item
                     positions=[
-                        injection_positions
-                    ],  # List of lists of positions, one per batch
-                    steering_coefficient=1.0,  # Full steering
+                        act_token_positions
+                    ],  # List of position lists, one per batch item
+                    steering_coefficient=1.0,
                     device=device,
                     dtype=segment_activations_KD.dtype,
                 )
 
+                full_inputs_dict = {
+                    key: t.tensor(value, device=device).unsqueeze(0)
+                    for key, value in full_inputs_dict.items()
+                }
+                labels = full_inputs_dict["input_ids"].clone()
+                labels[:, :answer_start] = -100
+                full_inputs_dict["labels"] = labels
+
                 # Forward pass through oracle with steering
-                # Enable gradients for this forward pass so we can backprop through activations
-                # CRITICAL: Use enable_grad() to ensure gradients flow through even with frozen oracle
+                if self.model is None:
+                    raise ValueError("Model is None")
                 with (
                     add_hook(self.oracle_injection_submodule, steering_hook),
                     t.enable_grad(),
                 ):
-                    oracle_outputs = self.oracle_model(**oracle_inputs)
-                    logits = oracle_outputs.logits  # [1, L, V]
+                    oracle_outputs = self.model(**full_inputs_dict)
+                    loss = oracle_outputs.loss
 
-                # Create labels: -100 for question tokens, actual tokens for answer
-                labels = oracle_inputs["input_ids"].clone()
-                labels[0, :answer_start] = -100  # Ignore question tokens
+                    # Negate to maximize (gradient ascent on oracle loss)
+                    adv_losses.append(-loss)
 
-                # Compute cross-entropy loss (only on answer tokens)
-                shift_logits = logits[0, :-1, :].contiguous()  # [L-1, V]
-                shift_labels = labels[0, 1:].contiguous()  # [L-1]
+            return t.stack(adv_losses).mean()
 
-                loss_fn = t.nn.CrossEntropyLoss(ignore_index=-100)
-                answer_loss = loss_fn(shift_logits, shift_labels)
-
-                # Negate to maximize (we want high loss on answer = low probability)
-                adv_losses.append(-answer_loss)
-
-            finally:
-                if was_training:
-                    self.oracle_model.train()
-
-        if len(adv_losses) == 0:
-            return t.tensor(0.0, device=device, requires_grad=True)
-
-        return t.stack(adv_losses).mean()
+        finally:
+            # Switch back to our trainable adapter
+            model.set_adapter(TRAINABLE_ADAPTER_NAME)
 
 
 def config_to_experiment_config(cfg: DictConfig) -> AdversarialExperimentConfig:
@@ -927,8 +972,73 @@ def main(cfg: DictConfig) -> None:
             tags=list(cfg.wandb.tags) if cfg.wandb.tags else None,
         )
 
-    # Load model and tokenizer
-    model, tokenizer = load_model_and_tokenizer(exp_cfg)
+    # Load base model and tokenizer (without LoRA yet)
+    logger.info(f"Loading base model: {exp_cfg.model_name}")
+    dtype = get_dtype(exp_cfg.dtype)
+    tokenizer = AutoTokenizer.from_pretrained(
+        exp_cfg.tokenizer_name,
+        trust_remote_code=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Set up quantization config if needed
+    quantization_config = None
+    if exp_cfg.load_in_4bit:
+        logger.info("Loading model with 4-bit quantization")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=dtype,
+        )
+    elif exp_cfg.load_in_8bit:
+        logger.info("Loading model with 8-bit quantization")
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=dtype,
+        )
+
+    # Load base model
+    model_kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "device_map": "auto" if exp_cfg.device == "cuda" else None,
+        "trust_remote_code": True,
+        "attn_implementation": exp_cfg.attn_implementation,
+    }
+    if quantization_config is not None:
+        model_kwargs["quantization_config"] = quantization_config
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        exp_cfg.model_name,
+        **model_kwargs,
+    )
+
+    # Load oracle adapter first (will be frozen)
+    logger.info(f"Loading oracle adapter: {exp_cfg.oracle_path}")
+    model = PeftModel.from_pretrained(
+        base_model,
+        exp_cfg.oracle_path,
+        adapter_name=ORACLE_ADAPTER_NAME,
+    )
+
+    # Add our trainable adapter
+    if exp_cfg.lora_enabled:
+        logger.info("Adding trainable LoRA adapter...")
+        lora_config = LoraConfig(
+            r=exp_cfg.lora_r,
+            lora_alpha=exp_cfg.lora_alpha,
+            lora_dropout=exp_cfg.lora_dropout,
+            target_modules=exp_cfg.lora_target_modules,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model.add_adapter(TRAINABLE_ADAPTER_NAME, lora_config)
+        model.set_adapter(TRAINABLE_ADAPTER_NAME)  # Set our adapter as active
+        model.print_trainable_parameters()
+
+    # Enable gradient checkpointing if requested
+    if exp_cfg.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
 
     # Load and prepare dataset
     datasets = load_and_prepare_conversation_dataset(
@@ -945,8 +1055,6 @@ def main(cfg: DictConfig) -> None:
     adversarial_dataset = generate_adversarial_dataset(datasets, tokenizer, exp_cfg)
 
     # Convert to HuggingFace Dataset format
-    from datasets import Dataset
-
     adversarial_hf_dataset = Dataset.from_list(adversarial_dataset)
 
     # Split into train/val (use same split ratio as original)
@@ -958,32 +1066,14 @@ def main(cfg: DictConfig) -> None:
         "validation": split_result["test"],
     }
 
-    # Load oracle model
-    logger.info("Loading oracle model...")
-    dtype = get_dtype(exp_cfg.dtype)
-
-    oracle_tokenizer = load_tokenizer(exp_cfg.model_name)
-    oracle_base_model = load_model(exp_cfg.model_name, dtype)
-    oracle_model = PeftModel.from_pretrained(
-        oracle_base_model,  # type: ignore[arg-type]
-        exp_cfg.oracle_path,
-        adapter_name=ORACLE_ADAPTER_NAME,
-    )
-    oracle_model.eval()
-    oracle_model.set_adapter(ORACLE_ADAPTER_NAME)
-
-    # Freeze oracle model
-    for param in oracle_model.parameters():
-        param.requires_grad = False
-
     # Create custom data collator that preserves question and oracle_answer fields
     class AdversarialDataCollator(DataCollatorForLanguageModeling):
         def __call__(
             self, features: list[dict[str, Any]], return_tensors: str | None = None
         ) -> dict[str, Any]:
             # Extract metadata
-            questions = [f.get("question", "") for f in features]
-            oracle_answers = [f.get("oracle_answer", "") for f in features]
+            questions = [f["question"] for f in features]
+            oracle_answers = [f["oracle_answer"] for f in features]
 
             # Remove metadata from features before collation
             collate_features = []
@@ -1038,11 +1128,8 @@ def main(cfg: DictConfig) -> None:
     )
 
     # Create trainer
-    # Cast oracle_tokenizer to PreTrainedTokenizer for AdversarialTrainer
     trainer = AdversarialTrainer(
         adversarial_cfg=exp_cfg,
-        oracle_model=oracle_model,
-        oracle_tokenizer=cast("PreTrainedTokenizer", oracle_tokenizer),
         model=model,
         args=training_args,
         train_dataset=adversarial_datasets["train"],
@@ -1050,6 +1137,13 @@ def main(cfg: DictConfig) -> None:
         data_collator=data_collator,
         tokenizer=tokenizer,
     )
+
+    # Fix a bug with the question and oracle_answer columns being removed
+    trainer._set_signature_columns_if_needed()
+    if trainer._signature_columns is not None:
+        trainer._signature_columns += ["question", "oracle_answer"]
+    else:
+        trainer._signature_columns = ["question", "oracle_answer"]
 
     # Train
     logger.info("Starting training...")
