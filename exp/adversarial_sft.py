@@ -843,16 +843,12 @@ class AdversarialTrainer(Trainer):
                     self.adversarial_cfg.repeats, 1
                 )  # [K*repeats, D]
                 num_act_tokens = repeated_activations.shape[0]
-                # Ensure tokenizer is AutoTokenizer for find_pattern_in_tokens
-                if not isinstance(self.tokenizer, AutoTokenizer):
-                    raise ValueError(
-                        f"Expected AutoTokenizer, got {type(self.tokenizer)}"
-                    )
+
                 act_token_positions = find_pattern_in_tokens(
                     full_inputs_dict["input_ids"],
                     SPECIAL_TOKEN,
                     num_act_tokens,
-                    self.tokenizer,
+                    cast(AutoTokenizer, self.tokenizer),
                 )
 
                 assert (
@@ -891,9 +887,12 @@ class AdversarialTrainer(Trainer):
                     loss = oracle_outputs.loss
 
                     # Negate to maximize (gradient ascent on oracle loss)
-                    adv_losses.append(-loss)
+                    negated_loss = -loss
+                    adv_losses.append(negated_loss)
 
-            return t.stack(adv_losses).mean()
+            stacked_loss = t.stack(adv_losses)
+            mean_loss = stacked_loss.mean()
+            return mean_loss
 
         finally:
             # Switch back to our trainable adapter

@@ -355,6 +355,8 @@ def _load_oracle_model(
     # Set up device and dtype
     dtype = get_dtype(config.dtype)
     device = torch.device(config.device)
+    # IMPORTANT: don't leak global grad mode into callers (e.g. training loops)
+    _prev_grad_enabled = torch.is_grad_enabled()
     torch.set_grad_enabled(False)
 
     # Load model and tokenizer
@@ -403,6 +405,7 @@ def _load_oracle_model(
             if hasattr(inner_model, "layers"):
                 peft_model_model.layers = inner_model.layers  # type: ignore[attr-defined]
 
+    torch.set_grad_enabled(_prev_grad_enabled)
     return model, tokenizer, dtype, device
 
 
@@ -463,6 +466,8 @@ def run_oracle_eval(
     # Set up device and dtype
     dtype = get_dtype(config.dtype)
     device = torch.device(config.device)
+    # IMPORTANT: don't leak global grad mode into callers (e.g. training loops)
+    _prev_grad_enabled = torch.is_grad_enabled()
     torch.set_grad_enabled(False)
 
     # Load model and tokenizer
@@ -723,6 +728,7 @@ def run_oracle_eval(
     assert 1.0 <= mean <= 5.0, f"Mean score must be between 1 and 5, got {mean}"
     logger.info(f"Mean judge score: {mean:.2f}")
 
+    torch.set_grad_enabled(_prev_grad_enabled)
     return eval_results
 
 
@@ -796,6 +802,8 @@ def run_oracle_eval_no_judge(
             dtype = get_dtype(config.dtype)
         if device is None:
             device = torch.device(config.device)
+        # IMPORTANT: don't leak global grad mode into callers (e.g. training loops)
+        _prev_grad_enabled = torch.is_grad_enabled()
         torch.set_grad_enabled(False)
 
     # Load target adapter if specified
@@ -990,6 +998,8 @@ def run_oracle_eval_no_judge(
         f"Completed oracle evaluation on {len(all_results)} pairs (no judge scoring)"
     )
 
+    if "_prev_grad_enabled" in locals():
+        torch.set_grad_enabled(_prev_grad_enabled)
     return eval_results
 
 
