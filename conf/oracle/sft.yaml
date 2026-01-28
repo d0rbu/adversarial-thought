@@ -17,7 +17,7 @@ temperature: 0.0
 do_sample: false
 
 # Batch size
-batch_size: 8
+batch_size: 5
 
 # Token indices for activation extraction
 token_start_idx: -10
@@ -25,3 +25,10 @@ token_end_idx: -2
 
 # Repeat count (applies to segment or full_seq depending on detected input type)
 repeats: 10
+
+# Context prompts source
+context:
+  # Source: "dataset" or "custom"
+  source: dataset
+  # For dataset source - number of samples (null = use all validation samples)
+  n_samples: 100

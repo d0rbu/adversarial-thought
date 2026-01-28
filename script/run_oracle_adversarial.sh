@@ -19,4 +19,5 @@ uv run python -m exp.run_oracle \
     hardware.dtype=bfloat16 \
     experiment.name=oracle_adversarial \
     experiment.output_dir=out/oracle_adversarial \
+    questions.split=val \
     "$@"

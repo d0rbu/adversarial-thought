@@ -19,4 +19,5 @@ uv run python -m exp.run_oracle \
     hardware.dtype=bfloat16 \
     experiment.name=oracle_sft_quick \
     experiment.output_dir=out/oracle_sft_quick \
+    questions.split=val \
     "$@"

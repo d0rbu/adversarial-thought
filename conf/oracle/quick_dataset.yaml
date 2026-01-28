@@ -1,7 +1,4 @@
 # Quick test configuration for oracle evaluation with dataset data
-# Uses minimal questions and dataset contexts for fast testing
-# Inherits from default.yaml via main config defaults
-
 # Base model (must match the oracle's training base)
 model_name: Qwen/Qwen3-8B
 

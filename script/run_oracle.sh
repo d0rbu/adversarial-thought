@@ -17,4 +17,5 @@ cd "$(dirname "$0")/.."
 
 uv run python -m exp.run_oracle \
     hardware.dtype=bfloat16 \
+    questions.split=val \
     "$@"

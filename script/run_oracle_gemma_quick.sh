@@ -20,4 +20,5 @@ uv run python -m exp.run_oracle \
     hardware.dtype=bfloat16 \
     experiment.name=oracle_gemma_quick \
     experiment.output_dir=out/oracle_gemma_quick \
+    questions.split=val \
     "$@"

@@ -13,7 +13,7 @@ num_fewshot:
 
 # Batch size
 batch_size: auto
-max_batch_size: 8
+max_batch_size: 16
 
 # No limit - run full evaluation
 limit:

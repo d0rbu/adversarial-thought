@@ -17,4 +17,5 @@ uv run python -m exp.run_oracle \
     hardware.dtype=bfloat16 \
     experiment.name=oracle_baseline_quick \
     experiment.output_dir=out/oracle_baseline_quick \
+    questions.split=val \
     "$@"
