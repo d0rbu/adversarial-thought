@@ -5,7 +5,7 @@ defaults:
 
 # Adversarial loss weight
 adversarial:
-  alpha: 0.1  # Weight for adversarial loss: final_loss = sft_loss + alpha * adv_loss
+  alpha: 0.04  # Weight for adversarial loss: final_loss = sft_loss + alpha * adv_loss
 
   # Oracle configuration
   oracle_path: adamkarvonen/checkpoints_latentqa_cls_past_lens_addition_Qwen3-8B
@@ -19,8 +19,8 @@ adversarial:
 # Inherit all other settings from default.yaml
 # Training hyperparameters
 num_epochs: 1
-batch_size: 1
-gradient_accumulation_steps: 8
+batch_size: 2
+gradient_accumulation_steps: 4
 effective_batch_size: 8  # batch_size * gradient_accumulation_steps
 
 # Optimizer settings
