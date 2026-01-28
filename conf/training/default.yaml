@@ -13,12 +13,12 @@ lr_scheduler_type: linear
 
 # Gradient settings
 max_grad_norm: 1.0
-gradient_checkpointing: false
+gradient_checkpointing: true
 
 # Logging and checkpointing
 logging_steps: 10
-eval_steps: 200
-save_steps: 200
+eval_steps: 100
+save_steps: 100
 save_total_limit: 3
 
 # Evaluation

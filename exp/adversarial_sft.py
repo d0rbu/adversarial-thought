@@ -98,6 +98,9 @@ class AdversarialExperimentConfig:
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
     gradient_checkpointing: bool = True
+    eval_steps: int = 100
+    save_steps: int = 100
+    save_total_limit: int = 3
 
     # Adversarial
     adversarial_alpha: float = 1.0
@@ -859,6 +862,9 @@ def config_to_experiment_config(cfg: DictConfig) -> AdversarialExperimentConfig:
         warmup_ratio=cfg.training.warmup_ratio,
         max_grad_norm=cfg.training.max_grad_norm,
         gradient_checkpointing=cfg.training.gradient_checkpointing,
+        eval_steps=cfg.training.eval_steps,
+        save_steps=cfg.training.save_steps,
+        save_total_limit=cfg.training.save_total_limit,
         adversarial_alpha=cfg.training.adversarial.alpha,
         oracle_path=cfg.training.adversarial.oracle_path,
         layer_percent=cfg.training.adversarial.layer_percent,
@@ -1071,9 +1077,9 @@ def main(cfg: DictConfig) -> None:
         max_grad_norm=exp_cfg.max_grad_norm,
         logging_steps=10,
         eval_strategy="steps",
-        eval_steps=500,
-        save_steps=500,
-        save_total_limit=3,
+        eval_steps=exp_cfg.eval_steps,
+        save_steps=exp_cfg.save_steps,
+        save_total_limit=exp_cfg.save_total_limit,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,

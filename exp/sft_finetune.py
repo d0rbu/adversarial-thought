@@ -66,6 +66,9 @@ class ExperimentConfig:
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
     gradient_checkpointing: bool = True
+    eval_steps: int = 100
+    save_steps: int = 100
+    save_total_limit: int = 3
 
     # Hardware
     dtype: str = "float16"
@@ -164,6 +167,16 @@ def load_model_and_tokenizer(
     if cfg.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
+    # When using k-bit quantization + gradient checkpointing, ensure at least one
+    # input to checkpointed blocks requires grad; otherwise losses can become
+    # non-differentiable (grad_fn=None) and backward() will fail.
+    if (
+        cfg.gradient_checkpointing
+        and (cfg.load_in_8bit or cfg.load_in_4bit)
+        and hasattr(model, "enable_input_require_grads")
+    ):
+        model.enable_input_require_grads()
+
     return model, tokenizer
 
 
@@ -182,9 +195,9 @@ def create_training_arguments(cfg: ExperimentConfig) -> TrainingArguments:
         max_grad_norm=cfg.max_grad_norm,
         logging_steps=10,
         eval_strategy="steps",
-        eval_steps=500,
-        save_steps=500,
-        save_total_limit=3,
+        eval_steps=cfg.eval_steps,
+        save_steps=cfg.save_steps,
+        save_total_limit=cfg.save_total_limit,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
@@ -220,6 +233,9 @@ def config_to_experiment_config(cfg: DictConfig) -> ExperimentConfig:
         warmup_ratio=cfg.training.warmup_ratio,
         max_grad_norm=cfg.training.max_grad_norm,
         gradient_checkpointing=cfg.training.gradient_checkpointing,
+        eval_steps=cfg.training.eval_steps,
+        save_steps=cfg.training.save_steps,
+        save_total_limit=cfg.training.save_total_limit,
         dtype=cfg.hardware.dtype,
         device=cfg.hardware.device,
         load_in_4bit=cfg.model.load_in_4bit,

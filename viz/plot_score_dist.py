@@ -11,15 +11,15 @@ from viz.oracle import get_oracle_summary, get_score_distribution
 
 
 def plot_score_distribution(
-    yaml_path: str | Path,
-    output_path: str | Path | None = None,
+    yaml_path: Path,
+    output_path: Path,
     title: str | None = None,
 ) -> None:
     """Plot score distribution as a bar chart with no spaces between bars.
 
     Args:
         yaml_path: Path to oracle_results.yaml file
-        output_path: Optional path to save the plot. If None, displays interactively.
+        output_path: Path to save the plot.
         title: Optional title for the plot. If None, generates from summary.
     """
     # Load data
@@ -31,7 +31,7 @@ def plot_score_distribution(
     counts = [score_dist[score] for score in scores]
 
     # Create figure and axis
-    fig, ax = plt.subplots(figsize=(8, 6))
+    _fig, ax = plt.subplots(figsize=(8, 6))
 
     # Create bar chart with no spacing (width=1.0, align='edge' with no gap)
     bars = ax.bar(
@@ -82,14 +82,11 @@ def plot_score_distribution(
 
     plt.tight_layout()
 
-    # Save or display
-    if output_path:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(output_path, dpi=300, bbox_inches="tight")
-        print(f"Plot saved to: {output_path}")
-    else:
-        plt.show()
+    # Save plot
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    print(f"Plot saved to: {output_path}")
 
     plt.close()
 
@@ -107,13 +104,18 @@ def main(
     yaml_path
         Path to oracle_results.yaml file.
     output
-        Output path for the plot (default: display interactively).
+        Output path for the plot (default: fig/{yaml_filename_stem}.png).
     title
         Title for the plot (default: auto-generated from summary).
     """
+    # Default output path based on yaml filename stem
+    if output is None:
+        yaml_path_obj = Path(yaml_path)
+        output = f"fig/{yaml_path_obj.stem}.png"
+
     plot_score_distribution(
-        yaml_path=yaml_path,
-        output_path=output,
+        yaml_path=Path(yaml_path),
+        output_path=Path(output),
         title=title,
     )
 

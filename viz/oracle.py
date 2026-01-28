@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 
-def load_oracle_yaml(yaml_path: str | Path) -> dict:
+def load_oracle_yaml(yaml_path: Path) -> dict:
     """Load oracle results from YAML file.
 
     Args:
@@ -30,7 +30,7 @@ def load_oracle_yaml(yaml_path: str | Path) -> dict:
     return data
 
 
-def get_score_distribution(yaml_path: str | Path) -> dict[int, int]:
+def get_score_distribution(yaml_path: Path) -> dict[int, int]:
     """Extract score distribution from oracle results YAML.
 
     Args:
@@ -66,7 +66,7 @@ def get_score_distribution(yaml_path: str | Path) -> dict[int, int]:
     return result
 
 
-def get_oracle_summary(yaml_path: str | Path) -> dict:
+def get_oracle_summary(yaml_path: Path) -> dict:
     """Extract summary information from oracle results YAML.
 
     Args:
@@ -79,7 +79,7 @@ def get_oracle_summary(yaml_path: str | Path) -> dict:
     return data.get("oracle_evaluation_summary", {})
 
 
-def get_metrics(yaml_path: str | Path) -> dict:
+def get_metrics(yaml_path: Path) -> dict:
     """Extract metrics from oracle results YAML.
 
     Args:
