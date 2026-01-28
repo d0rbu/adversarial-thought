@@ -40,8 +40,6 @@ VAL_QUESTIONS: list[str] = [
     "What is the final character or symbol?",
     "Is the text complete or cut off mid-sentence?",
     # Content extraction
-    "Summarize this text in one sentence.",
-    "What specific names are mentioned?",
     "What dates or times are referenced?",
     "What is being described or explained?",
     # Factual grounding

@@ -219,7 +219,7 @@ uv run python -m exp.sft_finetune \
 - [x] Set up SFT finetuning on Dolci-Instruct-SFT
 - [x] Add lm-eval-harness integration for benchmarking
 - [ ] Establish baseline metrics on lm-eval-harness benchmarks
-- [ ] Evaluate activation oracle accuracy on baseline model
+- [x] Evaluate activation oracle accuracy on baseline model
 
 ### Phase 2: Oracle Question Generation
 - [x] Design question set Q for activation oracle probing
@@ -229,8 +229,8 @@ uv run python -m exp.sft_finetune \
 - [x] Add oracle evaluation configurations
 
 ### Phase 3: Adversarial Finetuning
-- [ ] Implement adversarial loss term (maximize oracle error)
-- [ ] Train adversarial models with varying loss weights
+- [x] Implement adversarial loss term (maximize oracle error)
+- [x] Train adversarial models with varying loss weights
 - [ ] Analyze performance-obfuscation Pareto frontier
 
 ### Phase 4: Transfer & Analysis

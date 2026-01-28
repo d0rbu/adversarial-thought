@@ -31,7 +31,7 @@ questions:
   # Question split: train, val, or all
   split: train
   # Number of questions to use (null = all)
-  n_questions: 5
+  n_questions:
 
 # LLM Judge configuration
 judge:

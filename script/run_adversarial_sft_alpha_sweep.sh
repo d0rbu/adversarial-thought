@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Alpha values to sweep through
-ALPHA_VALUES=(0.004 0.01 0.04 0.1)
+ALPHA_VALUES=(0.001 0.004 0.01 0.04 0.1)
 
 echo "Starting alpha sweep with values: ${ALPHA_VALUES[*]}"
 echo "Total runs: ${#ALPHA_VALUES[@]}"
