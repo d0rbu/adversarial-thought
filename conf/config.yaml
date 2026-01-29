@@ -26,6 +26,12 @@ hardware:
   dtype: float16
   compile: true
 
+# Hardware settings specifically for adversarial oracle inference (dataset generation).
+# `target_gpu_utilization` can be set to a float in (0, 1), e.g. 0.5 to limit the
+# oracle model to at most 50% of each GPU's memory, offloading the rest to CPU.
+adversarial_hardware:
+  target_gpu_utilization:
+
 # Hydra settings
 hydra:
   run:

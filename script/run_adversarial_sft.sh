@@ -14,6 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 uv run python -m exp.adversarial_sft \
+    --config-name config_adversarial \
     training=adversarial \
     experiment.name=adversarial_sft \
     experiment.output_dir=out/adversarial_sft \

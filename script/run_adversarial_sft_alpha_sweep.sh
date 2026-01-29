@@ -83,6 +83,7 @@ for ((i=$START_INDEX; i<${#ALPHA_VALUES[@]}; i++)); do
     echo "=========================================="
 
     uv run python -m exp.adversarial_sft \
+        --config-name config_adversarial \
         training=adversarial \
         training.adversarial.alpha="$alpha" \
         experiment.name=adversarial_sft_alpha_${alpha_str} \

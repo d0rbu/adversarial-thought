@@ -119,6 +119,11 @@ class AdversarialExperimentConfig:
     load_in_4bit: bool = False
     load_in_8bit: bool = False
     attn_implementation: str = "sdpa"
+    # Optional GPU utilization cap for oracle inference when generating
+    # adversarial samples. If set (e.g., 0.5), at most this fraction of each
+    # GPU's memory will be used for the oracle model, and the rest is
+    # offloaded to CPU.
+    adversarial_target_gpu_utilization: float | None = None
 
     # Experiment
     seed: int = 42
@@ -347,6 +352,7 @@ def generate_adversarial_dataset(
         token_start_idx=cfg.token_start_idx,
         token_end_idx=cfg.token_end_idx,
         repeats=cfg.repeats,
+        target_gpu_utilization=cfg.adversarial_target_gpu_utilization,
     )
 
     # Load oracle model once before processing batches (reused across all batches)
@@ -877,10 +883,13 @@ def config_to_experiment_config(cfg: DictConfig) -> AdversarialExperimentConfig:
         load_in_4bit=cfg.model.load_in_4bit,
         load_in_8bit=cfg.model.load_in_8bit,
         attn_implementation=cfg.model.attn_implementation,
+        adversarial_target_gpu_utilization=cfg.get("adversarial_hardware", {}).get(
+            "target_gpu_utilization", None
+        ),
         seed=cfg.experiment.seed,
         output_dir=cfg.experiment.output_dir,
         cache_dir=cfg.experiment.get("cache_dir", ".cache/adv-thought"),
-        cache_batch_size=cfg.experiment.get("cache_batch_size", 32),
+        cache_batch_size=cfg.experiment.get("cache_batch_size", 16),
         wandb_enabled=cfg.wandb.enabled,
         wandb_project=cfg.wandb.project,
     )

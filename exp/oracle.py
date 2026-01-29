@@ -88,6 +88,12 @@ class OracleConfig:
     dtype: str = "float16"
     load_in_8bit: bool = False
 
+    # Optional GPU memory cap: fraction of total GPU memory to use.
+    # If set (e.g., 0.5), the oracle model will be loaded with a
+    # `max_memory` constraint so that at most this fraction of each GPU's
+    # memory is used, and the remainder is offloaded to CPU.
+    target_gpu_utilization: float | None = None
+
     # LLM judge settings
     judge_model: str = "gpt-5-nano"
     judge_max_tokens: int = 4096
@@ -373,6 +379,33 @@ def _load_oracle_model(
         )
         model_kwargs["device_map"] = "auto" if device.type == "cuda" else None
         model_kwargs["trust_remote_code"] = True
+
+    # Optionally cap GPU memory usage by setting Hugging Face `max_memory`.
+    # This only applies when using CUDA; otherwise it is ignored.
+    if device.type == "cuda" and config.target_gpu_utilization is not None:
+        util = config.target_gpu_utilization
+        assert 0.0 <= util <= 1.0, "target_gpu_utilization must be between 0 and 1"
+
+        num_gpus = torch.cuda.device_count()
+        assert num_gpus > 0, "No GPUs are visible"
+
+        max_memory: dict[int | str, str] = {}
+        for idx in range(num_gpus):
+            props = torch.cuda.get_device_properties(idx)
+            total_bytes = props.total_memory
+            allowed_bytes = int(total_bytes * util)
+            # Convert to GiB string expected by HF; floor to be safe.
+            allowed_gib = max(1, allowed_bytes // (1024**3))
+            max_memory[idx] = f"{allowed_gib}GiB"
+
+        # Always allow large CPU offload.
+        max_memory["cpu"] = "128GiB"
+        logger.info(
+            "Capping oracle GPU memory to ~%.0f%% of each GPU: %s",
+            util * 100.0,
+            max_memory,
+        )
+        model_kwargs["max_memory"] = max_memory
 
     base_model: AutoModelForCausalLM = load_model(
         config.model_name, dtype, **model_kwargs

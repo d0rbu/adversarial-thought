@@ -11,7 +11,7 @@ experiment:
   seed: 0
   output_dir: out/${experiment.name}
   cache_dir: .cache/adv-thought
-  cache_batch_size: 32  # Batch size for incremental cache generation
+  cache_batch_size: 4  # Batch size for incremental cache generation
 
 # Weights & Biases logging
 wandb:
@@ -27,6 +27,12 @@ hardware:
   device: cuda
   dtype: float16
   compile: false  # Disable compile for adversarial training (may cause issues with hooks)
+
+# Hardware settings specifically for adversarial oracle inference (dataset generation).
+# `target_gpu_utilization` can be set to a float in (0, 1), e.g. 0.5 to limit the
+# oracle model to at most 50% of each GPU's memory, offloading the rest to CPU.
+adversarial_hardware:
+  target_gpu_utilization:
 
 # Hydra settings
 hydra:
