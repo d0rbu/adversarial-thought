@@ -157,17 +157,28 @@ def plot_pareto(
             )
         )
 
-    # Alpha sweep points (ordered by alpha)
+    # Alpha sweep points (ordered by alpha).
+    # Some runs may have oracle results but no lm-eval; we record those as (alpha, x) for dashed vertical lines.
     alpha_points: list[Point] = []
+    oracle_only: list[tuple[float, float]] = []  # (alpha, oracle_x)
     for a in sorted(alphas):
         adapter_path = f"{alpha_adapter_prefix}{_alpha_to_dir_suffix(a)}"
-        oracle_yaml = _find_oracle_yaml_for_target_adapter(out_root, adapter_path)
-        lmeval_yaml = _find_lmeval_yaml_for_adapter(out_root, adapter_path)
+        try:
+            oracle_yaml = _find_oracle_yaml_for_target_adapter(out_root, adapter_path)
+        except (FileNotFoundError, ValueError):
+            continue
+        x = _oracle_score(oracle_yaml, normalize=oracle_normalize)
+        try:
+            lmeval_yaml = _find_lmeval_yaml_for_adapter(out_root, adapter_path)
+            y = _lmeval_avg(lmeval_yaml)
+        except (FileNotFoundError, ValueError):
+            oracle_only.append((a, x))
+            continue
         alpha_points.append(
             Point(
                 label=f"{a:g}",
-                x=_oracle_score(oracle_yaml, normalize=oracle_normalize),
-                y=_lmeval_avg(lmeval_yaml),
+                x=x,
+                y=y,
                 kind="alpha",
             )
         )
@@ -191,6 +202,35 @@ def plot_pareto(
             ha="left",
             fontsize=9,
         )
+
+    # Oracle-only runs (no lm-eval): dashed vertical line at oracle score.
+    for i, (a, x) in enumerate(oracle_only):
+        ax.axvline(
+            x=x,
+            color="gray",
+            linestyle="--",
+            alpha=0.7,
+            linewidth=1.5,
+            label="oracle only (no lm-eval)" if i == 0 else None,
+        )
+        y_top = ax.get_ylim()[1]
+        ax.annotate(
+            f"{a:g} (no lm-eval)",
+            (x, y_top),
+            xytext=(0, 5),
+            textcoords="offset points",
+            ha="center",
+            fontsize=8,
+            color="gray",
+            rotation=90,
+            rotation_mode="anchor",
+        )
+
+    # Extend x-axis so oracle-only vertical lines are visible.
+    if oracle_only:
+        x_min, x_max = ax.get_xlim()
+        ox_vals = [x for _, x in oracle_only]
+        ax.set_xlim(min(x_min, *ox_vals), max(x_max, *ox_vals))
 
     # Baselines (not connected)
     for p, color, marker in [
