@@ -45,10 +45,16 @@ def _find_unique(paths: list[Path], *, what: str) -> Path:
 
 
 def _find_lmeval_yaml_for_adapter(out_root: Path, adapter_path: str | None) -> Path:
-    """Find eval YAML produced by `exp.evaluate` for a given adapter (or base)."""
+    """Find eval YAML produced by `exp.evaluate` for a given adapter (or base).
+    When multiple match (e.g. eval_sft and eval_sft_quick), prefer paths not containing '_quick'.
+    """
     if adapter_path:
         adapter_name = Path(adapter_path).name
         candidates = sorted(out_root.glob(f"**/eval_{adapter_name}.yaml"))
+        if len(candidates) > 1:
+            canonical = [p for p in candidates if "_quick" not in str(p)]
+            if canonical:
+                candidates = canonical
         return _find_unique(
             candidates,
             what=f"lm-eval YAML for adapter {adapter_path!r} (pattern eval_{adapter_name}.yaml under {out_root})",
@@ -76,6 +82,11 @@ def _find_lmeval_yaml_for_adapter(out_root: Path, adapter_path: str | None) -> P
         if s.adapter is None:
             base_candidates.append(p)
 
+    if len(base_candidates) > 1:
+        canonical = [p for p in base_candidates if "_quick" not in str(p)]
+        if canonical:
+            base_candidates = canonical
+
     return _find_unique(
         base_candidates,
         what=f"base-model lm-eval YAML (evaluation_summary.adapter null) under {out_root}",
@@ -85,7 +96,10 @@ def _find_lmeval_yaml_for_adapter(out_root: Path, adapter_path: str | None) -> P
 def _find_oracle_yaml_for_target_adapter(
     out_root: Path, target_adapter_path: str | None
 ) -> Path:
-    """Find oracle_results.yaml produced by `exp.run_oracle` for a target adapter."""
+    """Find oracle_results.yaml produced by `exp.run_oracle` for a target adapter.
+    When multiple match (e.g. oracle_baseline and oracle_baseline_quick), prefer
+    the canonical run: paths not containing '_quick' or '_quick_doc'.
+    """
     candidates = sorted(out_root.glob("**/oracle_results.yaml"))
     matched: list[Path] = []
     for p in candidates:
@@ -95,6 +109,10 @@ def _find_oracle_yaml_for_target_adapter(
             continue
         if summary.get("target_adapter") == target_adapter_path:
             matched.append(p)
+    if len(matched) > 1:
+        canonical = [p for p in matched if "_quick" not in str(p)]
+        if canonical:
+            matched = canonical
     return _find_unique(
         matched,
         what=f"oracle_results.yaml with target_adapter={target_adapter_path!r} under {out_root}",
@@ -203,27 +221,31 @@ def plot_pareto(
             fontsize=9,
         )
 
-    # Oracle-only runs (no lm-eval): dashed vertical line at oracle score.
+    # Oracle-only runs (no lm-eval): dashed vertical line at oracle score (same color as alpha sweep).
+    sweep_color = "C0"  # match default first color used by alpha sweep line
     for i, (a, x) in enumerate(oracle_only):
         ax.axvline(
             x=x,
-            color="gray",
+            color=sweep_color,
             linestyle="--",
             alpha=0.7,
             linewidth=1.5,
             label="oracle only (no lm-eval)" if i == 0 else None,
         )
-        y_top = ax.get_ylim()[1]
-        ax.annotate(
-            f"{a:g} (no lm-eval)",
-            (x, y_top),
-            xytext=(0, 5),
-            textcoords="offset points",
+        # Alternate label above/below so they don't overlap; use axes coords for y.
+        # Bottom labels use y < 0 so they sit below the x-axis tick labels.
+        on_top = (i % 2) == 0
+        y_axes = 1.02 if on_top else -0.06
+        va = "bottom" if on_top else "top"
+        ax.text(
+            x,
+            y_axes,
+            f"α={a:g}",  # noqa: RUF001
+            transform=ax.get_xaxis_transform(),
             ha="center",
-            fontsize=8,
-            color="gray",
-            rotation=90,
-            rotation_mode="anchor",
+            va=va,
+            fontsize=9,
+            color=sweep_color,
         )
 
     # Extend x-axis so oracle-only vertical lines are visible.
@@ -258,13 +280,17 @@ def plot_pareto(
     ax.set_ylabel("lm-eval performance (avg across tasks)")
     ax.grid(alpha=0.3, linestyle="--")
     ax.set_title(
-        title or "Pareto frontier: lm-eval vs oracle (alpha sweep)", fontweight="bold"
+        title or "Pareto frontier: lm-eval vs oracle (alpha sweep)",
+        fontweight="bold",
+        pad=20,
     )
     ax.legend(loc="best", fontsize=9)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
+    # Leave space between title and plot (top) and between x-axis and bottom α= labels (bottom).  # noqa: RUF003
+    _fig.subplots_adjust(top=0.84, bottom=0.18)
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
